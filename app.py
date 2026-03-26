@@ -57,42 +57,54 @@ def evaluate_answer(question, reference, student_answer, max_marks):
     if not reference or reference.strip() == "":
         return 1.0, 1.0, max_marks, "Accepted without reference.", "N/A", "N/A"
     
+    # Word Count Analysis
+    ref_words = len(reference.split())
+    stu_words = len(student_answer.split())
+    
     # BERT Similarity
     ref_emb = bert_model.encode(reference, convert_to_tensor=True)
     stu_emb = bert_model.encode(student_answer, convert_to_tensor=True)
     cosine_scores = util.cos_sim(ref_emb, stu_emb)
     semantic_similarity = float(cosine_scores[0][0])
     
-    # Adjusted score to avoid deflation
-    adjusted_semantic = min(1.0, semantic_similarity * 1.1)
-    
-    # Gemini Feedback
+    # Gemini Feedback & Completeness
     feedback = "Good attempt."
     strengths = "Relevant content."
     improvements = "Elaborate more."
     grammar_score = 0.8
+    completeness_score = 0.8
     
     if "GEMINI_API_KEY" in os.environ:
         try:
             prompt = f"""
             Evaluate student answer for:
             Question: {question}
-            Reference: {reference}
-            Student Answer: {student_answer}
+            Reference: {reference} (Words: {ref_words})
+            Student Answer: {student_answer} (Words: {stu_words})
             BERT Similarity: {semantic_similarity:.2f}
             
-            Provide JSON: {{"grammar_score": 0.0-1.0, "feedback": "...", "strengths": "...", "improvements": "..."}}
+            Provide JSON: {{"grammar_score": 0.0-1.0, "completeness_score": 0.0-1.0, "feedback": "...", "strengths": "...", "improvements": "..."}}
             """
             response = model.generate_content(prompt)
             res_json = json.loads(response.text.replace('```json', '').replace('```', ''))
             grammar_score = res_json.get('grammar_score', 0.8)
+            completeness_score = res_json.get('completeness_score', 0.8)
             feedback = res_json.get('feedback', feedback)
             strengths = res_json.get('strengths', strengths)
             improvements = res_json.get('improvements', improvements)
         except:
             pass
-            
-    final_score = (adjusted_semantic * 0.8 + grammar_score * 0.2) * max_marks
+    
+    # Justifiable Marking Formula
+    length_penalty = 0.8 if stu_words < ref_words * 0.4 else 1.0
+    weighted_score = (semantic_similarity * 0.60 + completeness_score * 0.25 + grammar_score * 0.15)
+    final_score = weighted_score * max_marks * length_penalty
+    
+    # Boost for high similarity
+    if semantic_similarity > 0.85 and completeness_score > 0.8:
+        final_score = max(final_score, max_marks * 0.9)
+        
+    final_score = max(0, min(max_marks, final_score))
     return semantic_similarity, grammar_score, round(final_score, 1), feedback, strengths, improvements
 
 # --- Session State ---
