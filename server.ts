@@ -1,3 +1,6 @@
+import dotenv from "dotenv";
+dotenv.config();
+
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
@@ -6,6 +9,9 @@ import bcrypt from "bcryptjs";
 import cors from "cors";
 import Database from "better-sqlite3";
 import { evaluateAnswer } from "./src/services/evaluationService.ts";
+
+console.log("GEMINI_API_KEY present:", !!process.env.GEMINI_API_KEY);
+console.log("API_KEY present:", !!process.env.API_KEY);
 
 const JWT_SECRET = process.env.JWT_SECRET || "evalai-secret-key";
 const db = new Database("evalai.db");
@@ -245,7 +251,14 @@ async function startServer() {
       const question = questions.find((q: any, idx: number) => (q._id || idx.toString()) === ans.questionId);
       if (!question) return ans;
       
-      const evalResult = await evaluateAnswer(question.text, question.referenceAnswer, ans.answerText, question.maxMarks);
+      const evalResult = await evaluateAnswer(
+        question.text, 
+        question.referenceAnswer, 
+        ans.answerText, 
+        question.maxMarks,
+        question.minWords || 0,
+        question.maxWords || 0
+      );
       return { ...ans, ...evalResult };
     }));
 
@@ -262,6 +275,46 @@ async function startServer() {
     }
 
     res.status(201).json({ id: info.lastInsertRowid, totalScore });
+  });
+
+  app.post("/api/submissions/:id/re-evaluate", authenticate, async (req: any, res) => {
+    const submissionId = req.params.id;
+    const submission = db.prepare("SELECT * FROM submissions WHERE id = ?").get(submissionId) as any;
+    if (!submission) return res.status(404).json({ message: "Submission not found" });
+
+    const activity = db.prepare("SELECT * FROM activities WHERE id = ?").get(submission.activityId) as any;
+    if (!activity) return res.status(404).json({ message: "Activity not found" });
+
+    const classroom = db.prepare("SELECT * FROM classrooms WHERE id = ?").get(activity.classroomId) as any;
+    
+    if (req.user.role !== 'teacher' && submission.studentId !== req.user.id) {
+      return res.status(403).json({ message: "Unauthorized" });
+    }
+
+    const questions = JSON.parse(activity.questions);
+    const answers = JSON.parse(submission.answers);
+
+    const evaluatedAnswers = await Promise.all(answers.map(async (ans: any) => {
+      const question = questions.find((q: any, idx: number) => (q._id || idx.toString()) === ans.questionId);
+      if (!question) return ans;
+      
+      const evalResult = await evaluateAnswer(
+        question.text, 
+        question.referenceAnswer, 
+        ans.answerText, 
+        question.maxMarks,
+        question.minWords || 0,
+        question.maxWords || 0
+      );
+      return { ...ans, ...evalResult };
+    }));
+
+    const totalScore = evaluatedAnswers.reduce((sum, ans) => sum + (ans.score || 0), 0);
+    
+    db.prepare("UPDATE submissions SET evaluatedAnswers = ?, totalScore = ?, status = ? WHERE id = ?")
+      .run(JSON.stringify(evaluatedAnswers), totalScore, 'evaluated', submissionId);
+
+    res.json({ message: "Re-evaluation complete", totalScore });
   });
 
   app.get("/api/submissions/activity/:activityId", authenticate, (req: any, res) => {
@@ -288,6 +341,43 @@ async function startServer() {
       evaluatedAnswers: s.evaluatedAnswers ? JSON.parse(s.evaluatedAnswers) : [],
       student: { name: s.studentName, email: s.studentEmail } 
     })));
+  });
+
+  app.post("/api/submissions/:id/reevaluate", authenticate, async (req: any, res) => {
+    const submissionId = req.params.id;
+    const submission = db.prepare("SELECT * FROM submissions WHERE id = ?").get(submissionId) as any;
+    
+    if (!submission) return res.status(404).json({ message: "Submission not found" });
+    if (req.user.role !== 'teacher' && submission.studentId !== req.user.id) {
+      return res.status(403).json({ message: "Unauthorized" });
+    }
+
+    const activity = db.prepare("SELECT * FROM activities WHERE id = ?").get(submission.activityId) as any;
+    const questions = JSON.parse(activity.questions);
+    const answers = JSON.parse(submission.answers);
+
+    // Re-perform Evaluation
+    const evaluatedAnswers = await Promise.all(answers.map(async (ans: any) => {
+      const question = questions.find((q: any, idx: number) => (q._id || idx.toString()) === ans.questionId);
+      if (!question) return ans;
+      
+      const evalResult = await evaluateAnswer(
+        question.text, 
+        question.referenceAnswer, 
+        ans.answerText, 
+        question.maxMarks,
+        question.minWords || 0,
+        question.maxWords || 0
+      );
+      return { ...ans, ...evalResult };
+    }));
+
+    const totalScore = evaluatedAnswers.reduce((sum, ans) => sum + (ans.score || 0), 0);
+    
+    db.prepare("UPDATE submissions SET evaluatedAnswers = ?, totalScore = ? WHERE id = ?")
+      .run(JSON.stringify(evaluatedAnswers), totalScore, submissionId);
+
+    res.json({ message: "Re-evaluation complete", totalScore, evaluatedAnswers });
   });
 
   // Notifications

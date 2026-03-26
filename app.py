@@ -6,7 +6,6 @@ import time
 import pandas as pd
 from datetime import datetime
 import google.generativeai as genai
-from sentence_transformers import SentenceTransformer, util
 import os
 
 # --- Configuration ---
@@ -14,18 +13,12 @@ st.set_page_layout = "wide"
 st.title("EvalAI - Academic Evaluation Portal")
 
 # Initialize Gemini
-if "GEMINI_API_KEY" in os.environ:
-    genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-    model = genai.GenerativeModel('gemini-1.5-flash')
+gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("API_KEY")
+if gemini_key:
+    genai.configure(api_key=gemini_key)
+    model = genai.GenerativeModel('gemini-flash-latest')
 else:
     st.warning("Gemini API Key not found in environment variables. Feedback features will be limited.")
-
-# Initialize BERT
-@st.cache_resource
-def load_bert():
-    return SentenceTransformer('all-MiniLM-L6-v2')
-
-bert_model = load_bert()
 
 # --- Database Setup ---
 def init_db():
@@ -53,59 +46,60 @@ def hash_password(password):
 def get_db_connection():
     return sqlite3.connect('evalai_streamlit.db')
 
-def evaluate_answer(question, reference, student_answer, max_marks):
-    if not reference or reference.strip() == "":
-        return 1.0, 1.0, max_marks, "Accepted without reference.", "N/A", "N/A"
-    
+def evaluate_answer(question, reference, student_answer, max_marks, min_words=0, max_words=0):
     # Word Count Analysis
-    ref_words = len(reference.split())
     stu_words = len(student_answer.split())
     
-    # BERT Similarity
-    ref_emb = bert_model.encode(reference, convert_to_tensor=True)
-    stu_emb = bert_model.encode(student_answer, convert_to_tensor=True)
-    cosine_scores = util.cos_sim(ref_emb, stu_emb)
-    semantic_similarity = float(cosine_scores[0][0])
+    # AI Ideal Answer Generation
+    ideal_answer = reference or "No reference provided."
+    if "GEMINI_API_KEY" in os.environ:
+        try:
+            ideal_prompt = f"As an expert academic, provide a concise, comprehensive, and accurate 'Gold Standard' answer for the following question. Question: {question}. {f'Teacher Hint: {reference}' if reference else ''}. Provide only the answer text."
+            ideal_res = model.generate_content(ideal_prompt)
+            ideal_answer = ideal_res.text
+        except:
+            pass
     
-    # Gemini Feedback & Completeness
+    # Gemini Quality & Feedback
     feedback = "Good attempt."
-    strengths = "Relevant content."
-    improvements = "Elaborate more."
-    grammar_score = 0.8
-    completeness_score = 0.8
+    quality_score = 0.5
+    strengths = "N/A"
+    improvements = "N/A"
     
     if "GEMINI_API_KEY" in os.environ:
         try:
             prompt = f"""
             Evaluate student answer for:
             Question: {question}
-            Reference: {reference} (Words: {ref_words})
-            Student Answer: {student_answer} (Words: {stu_words})
-            BERT Similarity: {semantic_similarity:.2f}
+            AI Ideal Answer: {ideal_answer}
+            Student Answer: {student_answer}
             
-            Provide JSON: {{"grammar_score": 0.0-1.0, "completeness_score": 0.0-1.0, "feedback": "...", "strengths": "...", "improvements": "..."}}
+            Word Count Constraints:
+            - Minimum Words Required: {min_words if min_words > 0 else "None"}
+            - Maximum Words Allowed: {max_words if max_words > 0 else "None"}
+            - Student's Actual Word Count: {stu_words}
+            
+            Evaluation Guidelines:
+            1. quality_score: (0.0 to 1.0) Overall score based on accuracy, depth, and word count adherence.
+               - CRITICAL: HEAVILY PENALIZE if the word count is significantly below the minimum. 
+                 An answer that is less than 10% of the minimum word count should NEVER receive more than 10% of the marks.
+            2. strengths: A brief list of what the student did well.
+            3. improvements: A brief list of specific areas for improvement.
+            4. feedback: A detailed, justifiable, and professional summary (3-4 sentences). Explain exactly why the marks were awarded or deducted.
+
+            Provide JSON: {{"quality_score": 0.0-1.0, "strengths": "...", "improvements": "...", "feedback": "..."}}
             """
             response = model.generate_content(prompt)
             res_json = json.loads(response.text.replace('```json', '').replace('```', ''))
-            grammar_score = res_json.get('grammar_score', 0.8)
-            completeness_score = res_json.get('completeness_score', 0.8)
-            feedback = res_json.get('feedback', feedback)
+            quality_score = float(res_json.get('quality_score', 0.5))
             strengths = res_json.get('strengths', strengths)
             improvements = res_json.get('improvements', improvements)
+            feedback = res_json.get('feedback', feedback)
         except:
             pass
     
-    # Justifiable Marking Formula
-    length_penalty = 0.8 if stu_words < ref_words * 0.4 else 1.0
-    weighted_score = (semantic_similarity * 0.60 + completeness_score * 0.25 + grammar_score * 0.15)
-    final_score = weighted_score * max_marks * length_penalty
-    
-    # Boost for high similarity
-    if semantic_similarity > 0.85 and completeness_score > 0.8:
-        final_score = max(final_score, max_marks * 0.9)
-        
-    final_score = max(0, min(max_marks, final_score))
-    return semantic_similarity, grammar_score, round(final_score, 1), feedback, strengths, improvements
+    final_score = max(0, min(max_marks, quality_score * max_marks))
+    return round(final_score, 1), feedback, strengths, improvements
 
 # --- Session State ---
 if 'user' not in st.session_state:
@@ -202,8 +196,11 @@ def teacher_dashboard():
                     st.divider()
                     q_text = st.text_area(f"Question {i+1}")
                     ref = st.text_area(f"Reference Answer {i+1}")
-                    marks = st.number_input(f"Max Marks {i+1}", 1, 100, 10)
-                    questions.append({"text": q_text, "referenceAnswer": ref, "maxMarks": marks})
+                    c1, c2, c3 = st.columns(3)
+                    marks = c1.number_input(f"Max Marks {i+1}", 1, 100, 10)
+                    min_w = c2.number_input(f"Min Words {i+1}", 0, 1000, 0)
+                    max_w = c3.number_input(f"Max Words {i+1}", 0, 2000, 0)
+                    questions.append({"text": q_text, "referenceAnswer": ref, "maxMarks": marks, "minWords": min_w, "maxWords": max_w})
                 
                 if st.form_submit_button("Publish Activity"):
                     code = hashlib.md5(title.encode()).hexdigest()[:5].upper()
@@ -275,11 +272,18 @@ def exam_interface():
         answers.append(ans)
         
     if st.button("Submit Exam"):
-        with st.spinner("Evaluating your answers using BERT & Gemini..."):
+        with st.spinner("Evaluating your answers using Gemini AI..."):
             evaluated = []
             total = 0
             for i, q in enumerate(questions):
-                sim, gram, score, feed, strn, imp = evaluate_answer(q['text'], q['referenceAnswer'], answers[i], q['maxMarks'])
+                score, feed, strn, imp = evaluate_answer(
+                    q['text'], 
+                    q['referenceAnswer'], 
+                    answers[i], 
+                    q['maxMarks'],
+                    q.get('minWords', 0),
+                    q.get('maxWords', 0)
+                )
                 evaluated.append({
                     "question": q['text'],
                     "studentAnswer": answers[i],
@@ -302,6 +306,72 @@ def exam_interface():
             time.sleep(3)
             st.rerun()
 
+# --- Results View ---
+def results_view(sub_id):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("""SELECT s.*, a.title, a.questions 
+                 FROM submissions s 
+                 JOIN activities a ON s.activity_id = a.id 
+                 WHERE s.id=?""", (sub_id,))
+    sub = c.fetchone()
+    conn.close()
+    
+    if not sub:
+        st.error("Submission not found")
+        return
+
+    st.header(f"Evaluation Report: {sub[6]}")
+    
+    col1, col2 = st.columns([3, 1])
+    with col2:
+        st.metric("Total Score", f"{sub[5]}")
+        if st.session_state.user['role'] == 'student':
+            if st.button("🔄 Request Re-evaluation"):
+                with st.spinner("Re-evaluating using Gemini AI..."):
+                    questions = json.loads(sub[7])
+                    answers = json.loads(sub[3])
+                    evaluated = []
+                    total = 0
+                    for i, q in enumerate(questions):
+                        score, feed, strn, imp = evaluate_answer(
+                            q['text'], 
+                            q['referenceAnswer'], 
+                            answers[i], 
+                            q['maxMarks'],
+                            q.get('minWords', 0),
+                            q.get('maxWords', 0)
+                        )
+                        evaluated.append({
+                            "question": q['text'],
+                            "studentAnswer": answers[i],
+                            "score": score,
+                            "feedback": feed,
+                            "strengths": strn,
+                            "improvements": imp
+                        })
+                        total += score
+                    
+                    conn = get_db_connection()
+                    c = conn.cursor()
+                    c.execute("UPDATE submissions SET evaluated_answers=?, total_score=? WHERE id=?", 
+                              (json.dumps(evaluated), total, sub_id))
+                    conn.commit()
+                    conn.close()
+                    st.success("Re-evaluation complete!")
+                    time.sleep(1)
+                    st.rerun()
+
+    evaluated_answers = json.loads(sub[4])
+    for i, ans in enumerate(evaluated_answers):
+        with st.container(border=True):
+            st.subheader(f"Question {i+1}")
+            st.write(f"**Question:** {ans['question']}")
+            st.info(f"**Your Answer:** {ans['studentAnswer']}")
+            
+            st.write(f"**AI Feedback:** *\"{ans['feedback']}\"*")
+            st.write(f"**Score:** {ans['score']}")
+
 # --- Main Logic ---
 if st.session_state.user is None:
     auth_page()
@@ -312,8 +382,30 @@ else:
         
     if 'active_exam' in st.session_state and st.session_state.active_exam:
         exam_interface()
+    elif 'view_results' in st.session_state and st.session_state.view_results:
+        if st.sidebar.button("Back to Dashboard"):
+            st.session_state.view_results = None
+            st.rerun()
+        results_view(st.session_state.view_results)
     else:
         if st.session_state.user['role'] == 'teacher':
             teacher_dashboard()
         else:
             student_dashboard()
+            
+            # Show past submissions
+            st.divider()
+            st.subheader("My Past Submissions")
+            conn = get_db_connection()
+            subs = pd.read_sql_query("""SELECT s.id, a.title, s.total_score, s.activity_id 
+                                        FROM submissions s 
+                                        JOIN activities a ON s.activity_id = a.id 
+                                        WHERE s.student_id=?""", conn, params=(st.session_state.user['id'],))
+            conn.close()
+            if not subs.empty:
+                for _, s in subs.iterrows():
+                    col1, col2 = st.columns([3, 1])
+                    col1.write(f"📊 {s['title']} - Score: {s['total_score']}")
+                    if col2.button("View Details", key=f"view_{s['id']}"):
+                        st.session_state.view_results = s['id']
+                        st.rerun()

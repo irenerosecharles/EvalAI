@@ -26,18 +26,6 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { cn } from './lib/utils';
 import axios from 'axios';
 import { format } from 'date-fns';
-import { 
-  BarChart, 
-  Bar, 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
-  ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell
-} from 'recharts';
 
 // --- Components ---
 
@@ -500,7 +488,7 @@ const ClassroomDetail = () => {
   const [activities, setActivities] = useState<any[]>([]);
   const [showCreateActivity, setShowCreateActivity] = useState(false);
   const [newActivity, setNewActivity] = useState({ title: '', type: 'exam', duration: 60, deadline: '' });
-  const [questions, setQuestions] = useState([{ text: '', maxMarks: 10, referenceAnswer: '' }]);
+  const [questions, setQuestions] = useState([{ text: '', maxMarks: 10, referenceAnswer: '', minWords: 0, maxWords: 0 }]);
   const { token } = useAuth();
 
   useEffect(() => {
@@ -662,7 +650,7 @@ const ClassroomDetail = () => {
                   <div className="flex justify-between items-center">
                     <h4 className="font-bold text-sm uppercase tracking-wider text-[#6B7280]">Questions</h4>
                     <button 
-                      onClick={() => setQuestions([...questions, { text: '', maxMarks: 10, referenceAnswer: '' }])}
+                      onClick={() => setQuestions([...questions, { text: '', maxMarks: 10, referenceAnswer: '', minWords: 0, maxWords: 0 }])}
                       className="text-xs font-bold text-[#1A1A1A] flex items-center gap-1 hover:underline"
                     >
                       <Plus size={14} /> Add Question
@@ -696,6 +684,36 @@ const ClassroomDetail = () => {
                               setQuestions(nq);
                             }}
                             className="w-full px-3 py-2 bg-white border border-[#E5E7EB] rounded-lg outline-none text-sm"
+                          />
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-[10px] font-bold text-[#9CA3AF] uppercase mb-1">Min Words</label>
+                          <input 
+                            type="number" 
+                            value={q.minWords}
+                            onChange={e => {
+                              const nq = [...questions];
+                              nq[idx].minWords = parseInt(e.target.value);
+                              setQuestions(nq);
+                            }}
+                            className="w-full px-3 py-2 bg-white border border-[#E5E7EB] rounded-lg outline-none text-sm"
+                            placeholder="0 for no limit"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-bold text-[#9CA3AF] uppercase mb-1">Max Words</label>
+                          <input 
+                            type="number" 
+                            value={q.maxWords}
+                            onChange={e => {
+                              const nq = [...questions];
+                              nq[idx].maxWords = parseInt(e.target.value);
+                              setQuestions(nq);
+                            }}
+                            className="w-full px-3 py-2 bg-white border border-[#E5E7EB] rounded-lg outline-none text-sm"
+                            placeholder="0 for no limit"
                           />
                         </div>
                       </div>
@@ -1084,18 +1102,41 @@ const ResultsView = () => {
   const { id } = useParams();
   const [submissions, setSubmissions] = useState<any[]>([]);
   const [selectedSubmission, setSelectedSubmission] = useState<any>(null);
+  const [isReevaluating, setIsReevaluating] = useState(false);
   const { user, token } = useAuth();
 
   useEffect(() => {
-    axios.get(`/api/submissions/activity/${id}`, { headers: { Authorization: `Bearer ${token}` } })
-      .then(res => {
-        setSubmissions(res.data);
-        if (user?.role === 'student' && res.data.length > 0) {
-          setSelectedSubmission(res.data[0]);
-        }
-      })
-      .catch(console.error);
+    fetchSubmissions();
   }, [id, user]);
+
+  const fetchSubmissions = async () => {
+    try {
+      const res = await axios.get(`/api/submissions/activity/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+      setSubmissions(res.data);
+      if (user?.role === 'student' && res.data.length > 0) {
+        setSelectedSubmission(res.data[0]);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleReevaluate = async () => {
+    if (!selectedSubmission) return;
+    setIsReevaluating(true);
+    try {
+      const res = await axios.post(`/api/submissions/${selectedSubmission._id}/re-evaluate`, {}, { 
+        headers: { Authorization: `Bearer ${token}` } 
+      });
+      // Fetch submissions again to refresh the UI
+      await fetchSubmissions();
+      alert('Re-evaluation complete! Your marks and feedback have been updated.');
+    } catch (err) {
+      alert('Re-evaluation failed. Please try again later.');
+    } finally {
+      setIsReevaluating(false);
+    }
+  };
 
   if (submissions.length === 0) return (
     <div className="p-20 text-center text-[#6B7280]">
@@ -1156,13 +1197,6 @@ const ResultsView = () => {
   }
 
   const submission = selectedSubmission;
-  const evaluatedCount = submission.evaluatedAnswers?.length || 0;
-  const avgSemantic = evaluatedCount > 0 
-    ? (submission.evaluatedAnswers.reduce((acc: number, curr: any) => acc + (curr.semanticScore || 0), 0) / evaluatedCount * 100).toFixed(0)
-    : "0";
-  const avgGrammar = evaluatedCount > 0 
-    ? (submission.evaluatedAnswers.reduce((acc: number, curr: any) => acc + (curr.grammarScore || 0), 0) / evaluatedCount * 100).toFixed(0)
-    : "0";
   const maxPossibleMarks = submission.evaluatedAnswers?.reduce((acc: number, curr: any) => acc + (curr.maxMarks || 10), 0) || 0;
 
   return (
@@ -1182,28 +1216,43 @@ const ResultsView = () => {
             {user?.role === 'teacher' ? `Reviewing ${submission.student.name}'s performance` : 'Detailed breakdown of your performance'}
           </p>
         </div>
-        <div className="text-right">
-          <div className="text-5xl font-black tracking-tighter text-[#1A1A1A]">
-            {submission.totalScore}<span className="text-2xl text-[#9CA3AF] font-medium">/{maxPossibleMarks}</span>
+        <div className="text-right flex flex-col items-end gap-3">
+          <div className="flex flex-col items-end">
+            <div className="text-5xl font-black tracking-tighter text-[#1A1A1A]">
+              {submission.totalScore}<span className="text-2xl text-[#9CA3AF] font-medium">/{maxPossibleMarks}</span>
+            </div>
+            <p className="text-xs font-bold text-[#6B7280] uppercase tracking-widest mt-1">Total Score</p>
           </div>
-          <p className="text-xs font-bold text-[#6B7280] uppercase tracking-widest mt-1">Total Score</p>
+          
+          {user?.role === 'student' && (
+            <button 
+              onClick={handleReevaluate}
+              disabled={isReevaluating}
+              className="flex items-center gap-2 px-4 py-2 bg-[#F3F4F6] text-[#1A1A1A] rounded-xl text-xs font-bold hover:bg-[#E5E7EB] transition-all disabled:opacity-50"
+            >
+              {isReevaluating ? (
+                <>
+                  <div className="w-3 h-3 border-2 border-[#1A1A1A]/20 border-t-[#1A1A1A] rounded-full animate-spin" />
+                  Re-evaluating...
+                </>
+              ) : (
+                <>
+                  <Timer size={14} />
+                  Request Re-evaluation
+                </>
+              )}
+            </button>
+          )}
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="bg-white p-6 rounded-3xl border border-[#E5E7EB] flex flex-col items-center text-center">
           <div className="w-12 h-12 bg-[#F0FDF4] text-[#16A34A] rounded-2xl flex items-center justify-center mb-4">
             <CheckCircle2 size={24} />
           </div>
-          <h4 className="text-sm font-bold text-[#6B7280] uppercase mb-1">Semantic Match</h4>
-          <p className="text-2xl font-bold">{avgSemantic}%</p>
-        </div>
-        <div className="bg-white p-6 rounded-3xl border border-[#E5E7EB] flex flex-col items-center text-center">
-          <div className="w-12 h-12 bg-[#EFF6FF] text-[#2563EB] rounded-2xl flex items-center justify-center mb-4">
-            <FileText size={24} />
-          </div>
-          <h4 className="text-sm font-bold text-[#6B7280] uppercase mb-1">Grammar Score</h4>
-          <p className="text-2xl font-bold">{avgGrammar}%</p>
+          <h4 className="text-sm font-bold text-[#6B7280] uppercase mb-1">Total Questions</h4>
+          <p className="text-2xl font-bold">{submission.evaluatedAnswers?.length || 0}</p>
         </div>
         <div className="bg-white p-6 rounded-3xl border border-[#E5E7EB] flex flex-col items-center text-center">
           <div className="w-12 h-12 bg-[#FEF2F2] text-[#DC2626] rounded-2xl flex items-center justify-center mb-4">
@@ -1220,7 +1269,14 @@ const ResultsView = () => {
           <div key={idx} className="bg-white p-8 rounded-[2rem] border border-[#E5E7EB] shadow-sm space-y-6">
             <div className="flex justify-between items-center">
               <span className="text-xs font-bold text-[#9CA3AF] uppercase tracking-widest">Question {idx + 1}</span>
-              <span className="text-lg font-bold">{ans.score} / {ans.maxMarks || 10}</span>
+              <div className="flex items-center gap-4">
+                {ans.wordCount !== undefined && (
+                  <span className="text-[10px] font-bold text-[#6B7280] uppercase tracking-wider">
+                    Words: {ans.wordCount}
+                  </span>
+                )}
+                <span className="text-lg font-bold">{ans.score} / {ans.maxMarks || 10}</span>
+              </div>
             </div>
             
             <div className="space-y-4">

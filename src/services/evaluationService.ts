@@ -1,139 +1,133 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { pipeline, cos_sim } from "@xenova/transformers";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+const getApiKey = () => {
+  const key = (process.env.GEMINI_API_KEY || process.env.API_KEY || "").trim();
+  return key;
+};
 
-// Lazy-load the BERT model for semantic similarity
-let extractor: any = null;
+let aiInstance: GoogleGenAI | null = null;
 
-async function getExtractor() {
-  if (!extractor) {
-    console.log("Loading BERT model (Xenova/all-MiniLM-L6-v2) for semantic evaluation...");
-    extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
-    console.log("BERT model loaded successfully.");
+const getAi = () => {
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    console.error("CRITICAL: No API key found in GEMINI_API_KEY or API_KEY environment variables.");
+    throw new Error("GEMINI_API_KEY is not set in environment variables.");
   }
-  return extractor;
+  
+  if (!aiInstance) {
+    try {
+      aiInstance = new GoogleGenAI({ apiKey });
+      console.log("GoogleGenAI instance initialized successfully.");
+    } catch (e) {
+      console.error("Error initializing GoogleGenAI:", e);
+      throw e;
+    }
+  }
+  return aiInstance;
+};
+
+const MODEL_NAME = "gemini-flash-latest"; 
+const FALLBACK_MODEL = "gemini-3.1-flash-lite-preview";
+
+async function generateWithFallback(params: any) {
+  const ai = getAi();
+  try {
+    return await ai.models.generateContent({ ...params, model: MODEL_NAME });
+  } catch (error) {
+    console.warn(`Primary model ${MODEL_NAME} failed, trying fallback ${FALLBACK_MODEL}`, error);
+    return await ai.models.generateContent({ ...params, model: FALLBACK_MODEL });
+  }
 }
 
-export async function evaluateAnswer(question: string, reference: string | undefined, studentAnswer: string, maxMarks: number) {
-  // If no reference answer, award full marks (as per requirements)
-  if (!reference || reference.trim() === "") {
-    return {
-      semanticScore: 1.0,
-      grammarScore: 1.0,
-      score: maxMarks,
-      feedback: "Answer accepted as no reference was provided.",
-      strengths: "Good attempt.",
-      improvements: "N/A"
-    };
-  }
-
+export async function evaluateAnswer(
+  question: string, 
+  reference: string | undefined, 
+  studentAnswer: string, 
+  maxMarks: number,
+  minWords: number = 0,
+  maxWords: number = 0
+) {
   try {
-    // 1. BERT Semantic Similarity
-    const extract = await getExtractor();
-    const [refOutput, studentOutput] = await Promise.all([
-      extract(reference, { pooling: 'mean', normalize: true }),
-      extract(studentAnswer, { pooling: 'mean', normalize: true })
-    ]);
+    // 1. Word Count Analysis (for context)
+    const studentWords = studentAnswer.trim().split(/\s+/).filter(w => w.length > 0).length;
 
-    const semanticSimilarity = cos_sim(refOutput.data, studentOutput.data);
-    
-    // 2. Word Count Analysis
-    const refWords = reference.trim().split(/\s+/).length;
-    const studentWords = studentAnswer.trim().split(/\s+/).length;
-    const wordRatio = Math.min(1.2, studentWords / refWords); // Cap at 1.2 to avoid rewarding excessive fluff
+    // 2. Generate an "Ideal Answer" using Gemini to serve as the gold standard
+    const idealAnswerResponse = await generateWithFallback({
+      contents: `As an expert academic, provide a concise, comprehensive, and accurate "Gold Standard" answer for the following question. 
+      This will be used to evaluate a student's response.
+      
+      Question: ${question}
+      ${reference ? `Teacher's Hint/Reference: ${reference}` : ""}
+      
+      Provide only the ideal answer text.`
+    });
 
-    // 3. Gemini for Completeness, Grammar & Feedback
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+    const idealAnswer = idealAnswerResponse.text || reference || "No ideal answer could be generated.";
+
+    // 3. Gemini for Full Evaluation (Marks & Feedback)
+    const response = await generateWithFallback({
       contents: `
-        You are an expert academic evaluator. A student has answered a question, and a BERT model has calculated a semantic similarity score of ${semanticSimilarity.toFixed(2)} against the reference answer.
+        You are an expert academic evaluator. A student has answered a question.
         
         Question: ${question}
-        Reference Answer: ${reference} (Word count: ${refWords})
-        Student Answer: ${studentAnswer} (Word count: ${studentWords})
-        Max Marks: ${maxMarks}
-        BERT Similarity Score: ${semanticSimilarity.toFixed(2)}
+        AI Ideal Answer: ${idealAnswer}
+        Student Answer: ${studentAnswer}
+        
+        Word Count Constraints:
+        - Minimum Words Required: ${minWords || "None"}
+        - Maximum Words Allowed: ${maxWords || "None"}
+        - Student's Actual Word Count: ${studentWords}
         
         Evaluation Guidelines:
-        1. completenessScore: How much of the key information from the reference answer is present in the student's answer? (0.0 to 1.0)
-        2. grammarScore: Rate the language quality, clarity, and technical correctness. (0.0 to 1.0)
-        3. feedback: Provide 2-3 sentences of constructive and encouraging feedback.
-        4. strengths: Identify one specific thing the student did well.
-        5. improvements: Identify one specific area for improvement.
+        1. score: (0.0 to 1.0) Overall score based on accuracy, depth, and word count adherence.
+           - CRITICAL: HEAVILY PENALIZE if the word count is significantly below the minimum. 
+             An answer that is less than 10% of the minimum word count should NEVER receive more than 10% of the marks.
+        2. strengths: A brief list of what the student did well.
+        3. improvements: A brief list of specific areas for improvement.
+        4. feedback: A detailed, justifiable, and professional summary (3-4 sentences). Explain exactly why the marks were awarded or deducted.
         
-        Provide the evaluation in JSON format with these exact keys:
-        - completenessScore
-        - grammarScore
-        - feedback
-        - strengths
-        - improvements
+        Provide the evaluation in JSON format.
       `,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            completenessScore: { type: Type.NUMBER },
-            grammarScore: { type: Type.NUMBER },
-            feedback: { type: Type.STRING },
+            score: { type: Type.NUMBER },
             strengths: { type: Type.STRING },
-            improvements: { type: Type.STRING }
+            improvements: { type: Type.STRING },
+            feedback: { type: Type.STRING }
           },
-          required: ["completenessScore", "grammarScore", "feedback", "strengths", "improvements"]
+          required: ["score", "strengths", "improvements", "feedback"]
         }
       }
     });
 
     const result = JSON.parse(response.text);
+    const qualityScore = Math.max(0, Math.min(1, result.score || 0));
     
-    /**
-     * Justifiable Marking Formula:
-     * - 60% Semantic Similarity (BERT) - Core meaning
-     * - 25% Completeness (Gemini) - Coverage of key points
-     * - 15% Grammar & Clarity (Gemini) - Presentation
-     * 
-     * Length Factor: We apply a slight penalty if the answer is significantly shorter 
-     * than the reference, but we don't penalize conciseness if the meaning is there.
-     */
-    const lengthPenalty = studentWords < refWords * 0.4 ? 0.8 : 1.0;
-    
-    // Combine scores
-    const weightedScore = (
-      semanticSimilarity * 0.60 + 
-      result.completenessScore * 0.25 + 
-      result.grammarScore * 0.15
-    );
-
-    // Apply length penalty and scale to maxMarks
-    let finalScore = weightedScore * maxMarks * lengthPenalty;
-
-    // Ensure marks are not "deflated" for high-similarity answers
-    if (semanticSimilarity > 0.85 && result.completenessScore > 0.8) {
-      finalScore = Math.max(finalScore, maxMarks * 0.9);
-    }
-
-    // Clamp score between 0 and maxMarks
+    let finalScore = qualityScore * maxMarks;
     finalScore = Math.max(0, Math.min(maxMarks, finalScore));
 
     return {
-      semanticScore: semanticSimilarity,
-      grammarScore: result.grammarScore,
+      strengths: result.strengths || "Good attempt.",
+      improvements: result.improvements || "Keep practicing.",
       score: parseFloat(finalScore.toFixed(1)),
       feedback: result.feedback,
-      strengths: result.strengths,
-      improvements: result.improvements
+      isValid: qualityScore > 0.3,
+      wordCount: studentWords,
+      maxMarks: maxMarks
     };
   } catch (error) {
     console.error("Evaluation error:", error);
-    // Fallback logic
     return {
-      semanticScore: 0.5,
-      grammarScore: 0.5,
+      strengths: "N/A",
+      improvements: "N/A",
       score: maxMarks * 0.5,
       feedback: "Evaluation fallback triggered due to an error.",
-      strengths: "Answer received.",
-      improvements: "Please check for technical issues."
+      isValid: true,
+      wordCount: 0,
+      maxMarks: maxMarks
     };
   }
 }
