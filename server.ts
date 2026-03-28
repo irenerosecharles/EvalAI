@@ -8,7 +8,7 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import cors from "cors";
 import Database from "better-sqlite3";
-import { evaluateAnswer } from "./src/services/evaluationService.ts";
+import { evaluateAnswer, getEmbeddings, calculateCosineSimilarity } from "./src/services/evaluationService.ts";
 
 console.log("GEMINI_API_KEY present:", !!process.env.GEMINI_API_KEY);
 console.log("API_KEY present:", !!process.env.API_KEY);
@@ -118,6 +118,14 @@ async function startServer() {
 
   // --- API Routes ---
 
+  // Config check
+  app.get("/api/config/check", (req, res) => {
+    res.json({
+      groqConfigured: !!process.env.GROQ_API_KEY,
+      geminiConfigured: !!(process.env.GEMINI_API_KEY || process.env.API_KEY)
+    });
+  });
+
   // Auth
   app.post("/api/auth/register", async (req, res) => {
     const { name, email, password, role } = req.body;
@@ -194,6 +202,21 @@ async function startServer() {
     res.json(activities.map(a => ({ ...a, _id: a.id, questions: JSON.parse(a.questions) })));
   });
 
+  app.get("/api/activities/all", authenticate, isTeacher, (req: any, res) => {
+    const activities = db.prepare(`
+      SELECT a.*, c.name as classroomName
+      FROM activities a
+      JOIN classrooms c ON a.classroomId = c.id
+      WHERE c.teacherId = ?
+      ORDER BY a.createdAt DESC
+    `).all(req.user.id);
+    res.json(activities.map((a: any) => ({ 
+      ...a, 
+      _id: a.id, 
+      questions: JSON.parse(a.questions) 
+    })));
+  });
+
   app.get("/api/activities/detail/:id", authenticate, (req, res) => {
     const activity = db.prepare("SELECT * FROM activities WHERE id = ?").get(req.params.id) as any;
     if (!activity) return res.status(404).json({ message: "Activity not found" });
@@ -247,34 +270,42 @@ async function startServer() {
     const questions = JSON.parse(activity.questions);
 
     // Perform Evaluation
-    const evaluatedAnswers = await Promise.all(answers.map(async (ans: any) => {
-      const question = questions.find((q: any, idx: number) => (q._id || idx.toString()) === ans.questionId);
-      if (!question) return ans;
+    try {
+      const evaluatedAnswers = await Promise.all(answers.map(async (ans: any) => {
+        const question = questions.find((q: any, idx: number) => (q._id || idx.toString()) === ans.questionId);
+        if (!question) return ans;
+        
+        const evalResult = await evaluateAnswer(
+          question.text, 
+          question.referenceAnswer, 
+          ans.answerText, 
+          question.maxMarks,
+          question.minWords || 0,
+          question.maxWords || 0
+        );
+        return { ...ans, ...evalResult };
+      }));
+
+      const totalScore = evaluatedAnswers.reduce((sum, ans) => sum + (ans.score || 0), 0);
       
-      const evalResult = await evaluateAnswer(
-        question.text, 
-        question.referenceAnswer, 
-        ans.answerText, 
-        question.maxMarks,
-        question.minWords || 0,
-        question.maxWords || 0
-      );
-      return { ...ans, ...evalResult };
-    }));
+      const stmt = db.prepare("INSERT INTO submissions (activityId, studentId, answers, evaluatedAnswers, totalScore, status) VALUES (?, ?, ?, ?, ?, ?)");
+      const info = stmt.run(activityId, req.user.id, JSON.stringify(answers), JSON.stringify(evaluatedAnswers), totalScore, 'evaluated');
 
-    const totalScore = evaluatedAnswers.reduce((sum, ans) => sum + (ans.score || 0), 0);
-    
-    const stmt = db.prepare("INSERT INTO submissions (activityId, studentId, answers, evaluatedAnswers, totalScore, status) VALUES (?, ?, ?, ?, ?, ?)");
-    const info = stmt.run(activityId, req.user.id, JSON.stringify(answers), JSON.stringify(evaluatedAnswers), totalScore, 'evaluated');
+      // Notify Teacher
+      const classroom = db.prepare("SELECT * FROM classrooms WHERE id = ?").get(activity.classroomId) as any;
+      if (classroom) {
+        db.prepare("INSERT INTO notifications (userId, message) VALUES (?, ?)")
+          .run(classroom.teacherId, `New submission for ${activity.title} by ${req.user.name}`);
+      }
 
-    // Notify Teacher
-    const classroom = db.prepare("SELECT * FROM classrooms WHERE id = ?").get(activity.classroomId) as any;
-    if (classroom) {
-      db.prepare("INSERT INTO notifications (userId, message) VALUES (?, ?)")
-        .run(classroom.teacherId, `New submission for ${activity.title} by ${req.user.name}`);
+      res.status(201).json({ id: info.lastInsertRowid, totalScore });
+    } catch (error: any) {
+      if (error.message === 'INVALID_API_KEY') {
+        return res.status(401).json({ message: "INVALID_API_KEY" });
+      }
+      console.error("Evaluation error:", error);
+      res.status(500).json({ message: "Evaluation failed" });
     }
-
-    res.status(201).json({ id: info.lastInsertRowid, totalScore });
   });
 
   app.post("/api/submissions/:id/re-evaluate", authenticate, async (req: any, res) => {
@@ -294,27 +325,35 @@ async function startServer() {
     const questions = JSON.parse(activity.questions);
     const answers = JSON.parse(submission.answers);
 
-    const evaluatedAnswers = await Promise.all(answers.map(async (ans: any) => {
-      const question = questions.find((q: any, idx: number) => (q._id || idx.toString()) === ans.questionId);
-      if (!question) return ans;
+    try {
+      const evaluatedAnswers = await Promise.all(answers.map(async (ans: any) => {
+        const question = questions.find((q: any, idx: number) => (q._id || idx.toString()) === ans.questionId);
+        if (!question) return ans;
+        
+        const evalResult = await evaluateAnswer(
+          question.text, 
+          question.referenceAnswer, 
+          ans.answerText, 
+          question.maxMarks,
+          question.minWords || 0,
+          question.maxWords || 0
+        );
+        return { ...ans, ...evalResult };
+      }));
+
+      const totalScore = evaluatedAnswers.reduce((sum, ans) => sum + (ans.score || 0), 0);
       
-      const evalResult = await evaluateAnswer(
-        question.text, 
-        question.referenceAnswer, 
-        ans.answerText, 
-        question.maxMarks,
-        question.minWords || 0,
-        question.maxWords || 0
-      );
-      return { ...ans, ...evalResult };
-    }));
+      db.prepare("UPDATE submissions SET evaluatedAnswers = ?, totalScore = ?, status = ? WHERE id = ?")
+        .run(JSON.stringify(evaluatedAnswers), totalScore, 'evaluated', submissionId);
 
-    const totalScore = evaluatedAnswers.reduce((sum, ans) => sum + (ans.score || 0), 0);
-    
-    db.prepare("UPDATE submissions SET evaluatedAnswers = ?, totalScore = ?, status = ? WHERE id = ?")
-      .run(JSON.stringify(evaluatedAnswers), totalScore, 'evaluated', submissionId);
-
-    res.json({ message: "Re-evaluation complete", totalScore });
+      res.json({ message: "Re-evaluation complete", totalScore });
+    } catch (error: any) {
+      if (error.message === 'INVALID_API_KEY') {
+        return res.status(401).json({ message: "INVALID_API_KEY" });
+      }
+      console.error("Re-evaluation error:", error);
+      res.status(500).json({ message: "Re-evaluation failed" });
+    }
   });
 
   app.get("/api/submissions/activity/:activityId", authenticate, (req: any, res) => {
@@ -357,33 +396,108 @@ async function startServer() {
     const answers = JSON.parse(submission.answers);
 
     // Re-perform Evaluation
-    const evaluatedAnswers = await Promise.all(answers.map(async (ans: any) => {
-      const question = questions.find((q: any, idx: number) => (q._id || idx.toString()) === ans.questionId);
-      if (!question) return ans;
+    try {
+      const evaluatedAnswers = await Promise.all(answers.map(async (ans: any) => {
+        const question = questions.find((q: any, idx: number) => (q._id || idx.toString()) === ans.questionId);
+        if (!question) return ans;
+        
+        const evalResult = await evaluateAnswer(
+          question.text, 
+          question.referenceAnswer, 
+          ans.answerText, 
+          question.maxMarks,
+          question.minWords || 0,
+          question.maxWords || 0
+        );
+        return { ...ans, ...evalResult };
+      }));
+
+      const totalScore = evaluatedAnswers.reduce((sum, ans) => sum + (ans.score || 0), 0);
       
-      const evalResult = await evaluateAnswer(
-        question.text, 
-        question.referenceAnswer, 
-        ans.answerText, 
-        question.maxMarks,
-        question.minWords || 0,
-        question.maxWords || 0
-      );
-      return { ...ans, ...evalResult };
-    }));
+      db.prepare("UPDATE submissions SET evaluatedAnswers = ?, totalScore = ? WHERE id = ?")
+        .run(JSON.stringify(evaluatedAnswers), totalScore, submissionId);
 
-    const totalScore = evaluatedAnswers.reduce((sum, ans) => sum + (ans.score || 0), 0);
-    
-    db.prepare("UPDATE submissions SET evaluatedAnswers = ?, totalScore = ? WHERE id = ?")
-      .run(JSON.stringify(evaluatedAnswers), totalScore, submissionId);
-
-    res.json({ message: "Re-evaluation complete", totalScore, evaluatedAnswers });
+      res.json({ message: "Re-evaluation complete", totalScore, evaluatedAnswers });
+    } catch (error: any) {
+      if (error.message === 'INVALID_API_KEY') {
+        return res.status(401).json({ message: "INVALID_API_KEY" });
+      }
+      console.error("Re-evaluation error:", error);
+      res.status(500).json({ message: "Re-evaluation failed" });
+    }
   });
 
   // Notifications
   app.get("/api/notifications", authenticate, (req: any, res) => {
     const notifications = db.prepare("SELECT * FROM notifications WHERE userId = ? ORDER BY createdAt DESC LIMIT 10").all(req.user.id);
     res.json(notifications.map((n: any) => ({ ...n, _id: n.id })));
+  });
+
+  // Plagiarism Check
+  app.get("/api/plagiarism/:activityId", authenticate, isTeacher, async (req: any, res) => {
+    try {
+      const submissions = db.prepare(`
+        SELECT s.*, u.name as studentName 
+        FROM submissions s 
+        JOIN users u ON s.studentId = u.id 
+        WHERE s.activityId = ?
+      `).all(req.params.activityId) as any[];
+
+      if (submissions.length < 2) {
+        return res.json({ matches: [] });
+      }
+
+      const activity = db.prepare("SELECT * FROM activities WHERE id = ?").get(req.params.activityId) as any;
+      const questions = JSON.parse(activity.questions);
+      const threshold = parseFloat(req.query.threshold as string) || 0.85;
+
+      const results: any[] = [];
+
+      for (let qIdx = 0; qIdx < questions.length; qIdx++) {
+        const questionId = questions[qIdx]._id || qIdx.toString();
+        const studentAnswers: { studentName: string, answerText: string, embeddings?: number[] }[] = [];
+
+        for (const sub of submissions) {
+          const answers = JSON.parse(sub.answers);
+          const ans = answers.find((a: any) => a.questionId === questionId);
+          if (ans && ans.answerText && ans.answerText.trim().length > 10) {
+            studentAnswers.push({
+              studentName: sub.studentName,
+              answerText: ans.answerText
+            });
+          }
+        }
+
+        if (studentAnswers.length < 2) continue;
+
+        // Generate embeddings for all answers for this question
+        for (const sa of studentAnswers) {
+          sa.embeddings = await getEmbeddings(sa.answerText);
+        }
+
+        // Compare all pairs
+        for (let i = 0; i < studentAnswers.length; i++) {
+          for (let j = i + 1; j < studentAnswers.length; j++) {
+            const similarity = calculateCosineSimilarity(studentAnswers[i].embeddings!, studentAnswers[j].embeddings!);
+            if (similarity >= threshold) {
+              results.push({
+                questionTitle: questions[qIdx].text,
+                student1: studentAnswers[i].studentName,
+                student2: studentAnswers[j].studentName,
+                similarity: parseFloat(similarity.toFixed(4)),
+                answer1: studentAnswers[i].answerText,
+                answer2: studentAnswers[j].answerText
+              });
+            }
+          }
+        }
+      }
+
+      res.json({ matches: results });
+    } catch (error) {
+      console.error("Plagiarism check error:", error);
+      res.status(500).json({ message: "Plagiarism check failed" });
+    }
   });
 
   // Vite middleware for development

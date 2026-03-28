@@ -18,7 +18,8 @@ import {
   MoreVertical,
   X,
   Copy,
-  Check
+  Check,
+  ShieldAlert
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useParams, Navigate } from 'react-router-dom';
@@ -27,7 +28,105 @@ import { cn } from './lib/utils';
 import axios from 'axios';
 import { format } from 'date-fns';
 
+declare global {
+  interface Window {
+    aistudio: {
+      hasSelectedApiKey: () => Promise<boolean>;
+      openSelectKey: () => Promise<void>;
+    };
+  }
+}
+
+// --- Axios Setup ---
+axios.interceptors.response.use(
+  response => response,
+  async error => {
+    if (error.response?.status === 401 && error.response?.data?.message === 'INVALID_API_KEY') {
+      if (window.aistudio) {
+        alert("The AI evaluation system requires a valid Gemini API key. Please select one in the following dialog.");
+        await window.aistudio.openSelectKey();
+        // After selecting a key, the environment is updated. 
+        // We can't easily retry the request because it's a POST with complex data usually,
+        // but the user can now try again.
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
 // --- Components ---
+
+const ApiKeyGuard = ({ children }: { children: React.ReactNode }) => {
+  const [hasKey, setHasKey] = useState<boolean | null>(null);
+  const [isGroqConfigured, setIsGroqConfigured] = useState<boolean>(false);
+
+  useEffect(() => {
+    const checkKey = async () => {
+      try {
+        const configRes = await axios.get('/api/config/check');
+        setIsGroqConfigured(configRes.data.groqConfigured);
+        
+        if (configRes.data.groqConfigured) {
+          setHasKey(true);
+          return;
+        }
+      } catch (err) {
+        console.error("Config check failed:", err);
+      }
+
+      if (window.aistudio) {
+        const selected = await window.aistudio.hasSelectedApiKey();
+        setHasKey(selected);
+      } else {
+        // Fallback for local development or non-AI Studio environments
+        setHasKey(true);
+      }
+    };
+    checkKey();
+  }, []);
+
+  const handleSelectKey = async () => {
+    if (window.aistudio) {
+      await window.aistudio.openSelectKey();
+      setHasKey(true);
+      // The page will likely refresh or the environment will be updated
+      // We assume success and proceed
+    }
+  };
+
+  if (hasKey === null) return null;
+
+  if (!hasKey) {
+    return (
+      <div className="min-h-screen bg-[#F8F9FA] flex flex-col items-center justify-center p-8 text-center">
+        <div className="w-20 h-20 bg-[#1A1A1A] rounded-[2.5rem] flex items-center justify-center mb-8 shadow-2xl rotate-3">
+          <BookOpen className="text-white w-10 h-10" />
+        </div>
+        <h1 className="text-3xl font-bold mb-4 tracking-tight">AI Evaluation Requires Setup</h1>
+        <p className="text-[#6B7280] mb-10 max-w-md leading-relaxed">
+          To enable high-accuracy AI grading and feedback, you must select a valid Gemini API key from a paid Google Cloud project.
+          <br /><br />
+          <a 
+            href="https://ai.google.dev/gemini-api/docs/billing" 
+            target="_blank" 
+            rel="noopener noreferrer"
+            className="text-[#1A1A1A] font-bold underline underline-offset-4"
+          >
+            Learn about billing & API keys
+          </a>
+        </p>
+        <button 
+          onClick={handleSelectKey}
+          className="px-10 py-4 bg-[#1A1A1A] text-white rounded-2xl font-bold hover:bg-[#333] transition-all active:scale-95 shadow-xl shadow-black/10 flex items-center gap-2"
+        >
+          Select API Key <ChevronRight size={20} />
+        </button>
+      </div>
+    );
+  }
+
+  return <>{children}</>;
+};
 
 class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean }> {
   state = { hasError: false };
@@ -374,10 +473,17 @@ const TeacherDashboard = () => {
   const [classrooms, setClassrooms] = useState<any[]>([]);
   const [showCreateClass, setShowCreateClass] = useState(false);
   const [newClassName, setNewClassName] = useState('');
+  const [activeTab, setActiveTab] = useState<'classrooms' | 'plagiarism'>('classrooms');
+  const [plagiarismResults, setPlagiarismResults] = useState<any[]>([]);
+  const [selectedActivity, setSelectedActivity] = useState('');
+  const [threshold, setThreshold] = useState(0.85);
+  const [isChecking, setIsChecking] = useState(false);
+  const [allActivities, setAllActivities] = useState<any[]>([]);
   const { token } = useAuth();
 
   useEffect(() => {
     fetchClassrooms();
+    fetchAllActivities();
   }, []);
 
   const fetchClassrooms = async () => {
@@ -390,12 +496,36 @@ const TeacherDashboard = () => {
     }
   };
 
+  const fetchAllActivities = async () => {
+    try {
+      const res = await axios.get('/api/activities/all', { headers: { Authorization: `Bearer ${token}` } });
+      setAllActivities(res.data);
+    } catch (err) {
+      console.error("Failed to fetch all activities:", err);
+    }
+  };
+
   const createClassroom = async () => {
     if (!newClassName) return;
     await axios.post('/api/classrooms', { name: newClassName }, { headers: { Authorization: `Bearer ${token}` } });
     setNewClassName('');
     setShowCreateClass(false);
     fetchClassrooms();
+  };
+
+  const runPlagiarismCheck = async () => {
+    if (!selectedActivity) return;
+    setIsChecking(true);
+    try {
+      const res = await axios.get(`/api/plagiarism/${selectedActivity}?threshold=${threshold}`, { 
+        headers: { Authorization: `Bearer ${token}` } 
+      });
+      setPlagiarismResults(res.data.matches);
+    } catch (err) {
+      alert('Plagiarism check failed');
+    } finally {
+      setIsChecking(false);
+    }
   };
 
   return (
@@ -405,38 +535,161 @@ const TeacherDashboard = () => {
           <h1 className="text-3xl font-bold tracking-tight">Teacher Dashboard</h1>
           <p className="text-[#6B7280] mt-1">Manage your classrooms and academic activities</p>
         </div>
+        {activeTab === 'classrooms' && (
+          <button 
+            onClick={() => setShowCreateClass(true)}
+            className="flex items-center gap-2 px-6 py-3 bg-[#1A1A1A] text-white rounded-2xl font-semibold hover:bg-[#333] transition-all"
+          >
+            <Plus size={20} /> Create Classroom
+          </button>
+        )}
+      </div>
+
+      <div className="flex gap-8 border-b border-[#E5E7EB] mb-10">
         <button 
-          onClick={() => setShowCreateClass(true)}
-          className="flex items-center gap-2 px-6 py-3 bg-[#1A1A1A] text-white rounded-2xl font-semibold hover:bg-[#333] transition-all"
+          onClick={() => setActiveTab('classrooms')}
+          className={cn(
+            "pb-4 text-sm font-bold tracking-widest uppercase transition-all relative flex items-center gap-2",
+            activeTab === 'classrooms' ? "text-[#1A1A1A]" : "text-[#9CA3AF] hover:text-[#6B7280]"
+          )}
         >
-          <Plus size={20} /> Create Classroom
+          <Users size={16} />
+          My Classrooms
+          {activeTab === 'classrooms' && <motion.div layoutId="tab" className="absolute bottom-0 left-0 right-0 h-1 bg-[#1A1A1A] rounded-t-full" />}
+        </button>
+        <button 
+          onClick={() => setActiveTab('plagiarism')}
+          className={cn(
+            "pb-4 text-sm font-bold tracking-widest uppercase transition-all relative flex items-center gap-2",
+            activeTab === 'plagiarism' ? "text-[#1A1A1A]" : "text-[#9CA3AF] hover:text-[#6B7280]"
+          )}
+        >
+          <ShieldAlert size={16} />
+          Plagiarism Check
+          {activeTab === 'plagiarism' && <motion.div layoutId="tab" className="absolute bottom-0 left-0 right-0 h-1 bg-[#1A1A1A] rounded-t-full" />}
         </button>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {classrooms.map(cls => (
-          <Link 
-            key={cls._id} 
-            to={`/classroom/${cls._id}`}
-            className="group bg-white p-6 rounded-3xl border border-[#E5E7EB] hover:border-[#1A1A1A] hover:shadow-xl transition-all"
-          >
-            <div className="w-12 h-12 bg-[#F3F4F6] rounded-2xl flex items-center justify-center mb-4 group-hover:bg-[#1A1A1A] transition-colors">
-              <Users className="text-[#6B7280] group-hover:text-white transition-colors" />
-            </div>
-            <h3 className="text-xl font-bold mb-1">{cls.name}</h3>
-            <div className="flex items-center justify-between mb-4">
-              <p className="text-sm text-[#6B7280]">Created {format(new Date(cls.createdAt), 'MMM d, yyyy')}</p>
-              <div className="flex items-center gap-1.5 px-2 py-1 bg-[#F3F4F6] rounded text-[10px] font-mono font-bold text-[#1A1A1A] border border-[#E5E7EB]">
-                CODE: {cls.joinCode}
-                <CopyButton text={cls.joinCode} />
+      {activeTab === 'classrooms' ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {classrooms.map(cls => (
+            <Link 
+              key={cls._id} 
+              to={`/classroom/${cls._id}`}
+              className="group bg-white p-6 rounded-3xl border border-[#E5E7EB] hover:border-[#1A1A1A] hover:shadow-xl transition-all"
+            >
+              <div className="w-12 h-12 bg-[#F3F4F6] rounded-2xl flex items-center justify-center mb-4 group-hover:bg-[#1A1A1A] transition-colors">
+                <Users className="text-[#6B7280] group-hover:text-white transition-colors" />
               </div>
+              <h3 className="text-xl font-bold mb-1">{cls.name}</h3>
+              <div className="flex items-center justify-between mb-4">
+                <p className="text-sm text-[#6B7280]">Created {format(new Date(cls.createdAt), 'MMM d, yyyy')}</p>
+                <div className="flex items-center gap-1.5 px-2 py-1 bg-[#F3F4F6] rounded text-[10px] font-mono font-bold text-[#1A1A1A] border border-[#E5E7EB]">
+                  CODE: {cls.joinCode}
+                  <CopyButton text={cls.joinCode} />
+                </div>
+              </div>
+              <div className="flex items-center text-sm font-semibold text-[#1A1A1A]">
+                View Activities <ChevronRight size={16} className="ml-1 group-hover:translate-x-1 transition-transform" />
+              </div>
+            </Link>
+          ))}
+        </div>
+      ) : (
+        <div className="space-y-8">
+          <div className="bg-white p-8 rounded-[2.5rem] border border-[#E5E7EB] shadow-sm">
+            <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
+              <ShieldAlert className="text-[#DC2626]" /> Plagiarism Detection System
+            </h3>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-end">
+              <div>
+                <label className="block text-[10px] font-bold text-[#6B7280] uppercase tracking-widest mb-2 ml-1">Select Activity</label>
+                <select 
+                  value={selectedActivity}
+                  onChange={e => setSelectedActivity(e.target.value)}
+                  className="w-full px-4 py-3 bg-[#F9FAFB] border border-[#E5E7EB] rounded-2xl outline-none focus:ring-2 focus:ring-[#1A1A1A]"
+                >
+                  <option value="">Choose an activity...</option>
+                  {allActivities.map(act => (
+                    <option key={act._id} value={act._id}>{act.title} ({act.classroomName})</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-[#6B7280] uppercase tracking-widest mb-2 ml-1">Similarity Threshold ({Math.round(threshold * 100)}%)</label>
+                <input 
+                  type="range" 
+                  min="0.5" 
+                  max="1.0" 
+                  step="0.01"
+                  value={threshold}
+                  onChange={e => setThreshold(parseFloat(e.target.value))}
+                  className="w-full h-2 bg-[#F3F4F6] rounded-lg appearance-none cursor-pointer accent-[#1A1A1A]"
+                />
+              </div>
+              <button 
+                onClick={runPlagiarismCheck}
+                disabled={isChecking || !selectedActivity}
+                className="py-3.5 bg-[#1A1A1A] text-white rounded-2xl font-bold hover:bg-[#333] transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {isChecking ? 'Analyzing...' : 'Run Analysis'}
+              </button>
             </div>
-            <div className="flex items-center text-sm font-semibold text-[#1A1A1A]">
-              View Activities <ChevronRight size={16} className="ml-1 group-hover:translate-x-1 transition-transform" />
+          </div>
+
+          {plagiarismResults.length > 0 ? (
+            <div className="space-y-6">
+              <h4 className="font-bold text-[#6B7280] uppercase tracking-widest text-xs ml-1">Detected Matches ({plagiarismResults.length})</h4>
+              {plagiarismResults.map((match, idx) => (
+                <motion.div 
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  key={idx} 
+                  className="bg-white p-8 rounded-[2rem] border border-[#DC2626]/20 shadow-sm relative overflow-hidden"
+                >
+                  <div className="absolute top-0 left-0 w-1.5 h-full bg-[#DC2626]" />
+                  <div className="flex justify-between items-start mb-6">
+                    <div>
+                      <span className="text-[10px] font-bold text-[#DC2626] uppercase tracking-widest bg-red-50 px-2 py-1 rounded">High Similarity Detected</span>
+                      <h4 className="text-lg font-bold mt-2">{match.questionTitle}</h4>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-2xl font-black text-[#DC2626]">{Math.round(match.similarity * 100)}%</div>
+                      <div className="text-[10px] font-bold text-[#6B7280] uppercase tracking-widest">Match Score</div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2">
+                        <div className="w-6 h-6 bg-[#F3F4F6] rounded-full flex items-center justify-center text-[10px] font-bold">1</div>
+                        <span className="font-bold text-sm">{match.student1}</span>
+                      </div>
+                      <div className="p-4 bg-[#F9FAFB] rounded-2xl border border-[#E5E7EB] text-sm text-[#4B5563] italic leading-relaxed">
+                        "{match.answer1}"
+                      </div>
+                    </div>
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2">
+                        <div className="w-6 h-6 bg-[#F3F4F6] rounded-full flex items-center justify-center text-[10px] font-bold">2</div>
+                        <span className="font-bold text-sm">{match.student2}</span>
+                      </div>
+                      <div className="p-4 bg-[#F9FAFB] rounded-2xl border border-[#E5E7EB] text-sm text-[#4B5563] italic leading-relaxed">
+                        "{match.answer2}"
+                      </div>
+                    </div>
+                  </div>
+                </motion.div>
+              ))}
             </div>
-          </Link>
-        ))}
-      </div>
+          ) : selectedActivity && !isChecking && (
+            <div className="p-20 text-center bg-white rounded-[2.5rem] border border-[#E5E7EB]">
+              <CheckCircle2 size={48} className="mx-auto mb-4 text-[#16A34A] opacity-20" />
+              <p className="text-[#6B7280] font-medium">No plagiarism detected above {Math.round(threshold * 100)}% threshold.</p>
+            </div>
+          )}
+        </div>
+      )}
 
       <AnimatePresence>
         {showCreateClass && (
@@ -680,7 +933,7 @@ const ClassroomDetail = () => {
                             value={q.maxMarks}
                             onChange={e => {
                               const nq = [...questions];
-                              nq[idx].maxMarks = parseInt(e.target.value);
+                              nq[idx].maxMarks = parseInt(e.target.value) || 0;
                               setQuestions(nq);
                             }}
                             className="w-full px-3 py-2 bg-white border border-[#E5E7EB] rounded-lg outline-none text-sm"
@@ -695,7 +948,7 @@ const ClassroomDetail = () => {
                             value={q.minWords}
                             onChange={e => {
                               const nq = [...questions];
-                              nq[idx].minWords = parseInt(e.target.value);
+                              nq[idx].minWords = parseInt(e.target.value) || 0;
                               setQuestions(nq);
                             }}
                             className="w-full px-3 py-2 bg-white border border-[#E5E7EB] rounded-lg outline-none text-sm"
@@ -709,7 +962,7 @@ const ClassroomDetail = () => {
                             value={q.maxWords}
                             onChange={e => {
                               const nq = [...questions];
-                              nq[idx].maxWords = parseInt(e.target.value);
+                              nq[idx].maxWords = parseInt(e.target.value) || 0;
                               setQuestions(nq);
                             }}
                             className="w-full px-3 py-2 bg-white border border-[#E5E7EB] rounded-lg outline-none text-sm"
@@ -1340,11 +1593,13 @@ const AppContent = () => {
 export default function App() {
   return (
     <ErrorBoundary>
-      <AuthProvider>
-        <Router>
-          <AppContent />
-        </Router>
-      </AuthProvider>
+      <ApiKeyGuard>
+        <AuthProvider>
+          <Router>
+            <AppContent />
+          </Router>
+        </AuthProvider>
+      </ApiKeyGuard>
     </ErrorBoundary>
   );
 }

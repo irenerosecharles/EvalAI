@@ -7,18 +7,34 @@ import pandas as pd
 from datetime import datetime
 import google.generativeai as genai
 import os
+from groq import Groq
+from sentence_transformers import SentenceTransformer, util
+import torch
 
 # --- Configuration ---
 st.set_page_layout = "wide"
 st.title("EvalAI - Academic Evaluation Portal")
 
-# Initialize Gemini
+# Cache SBERT model
+@st.cache_resource
+def load_sbert():
+    return SentenceTransformer('all-MiniLM-L6-v2')
+
+# Cache Groq client
+@st.cache_resource
+def get_groq_client():
+    api_key = os.environ.get("GROQ_API_KEY")
+    if api_key:
+        return Groq(api_key=api_key)
+    return None
+
+# Initialize Gemini (as fallback or for ideal answer)
 gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("API_KEY")
 if gemini_key:
     genai.configure(api_key=gemini_key)
-    model = genai.GenerativeModel('gemini-flash-latest')
+    model = genai.GenerativeModel('gemini-3-flash-preview')
 else:
-    st.warning("Gemini API Key not found in environment variables. Feedback features will be limited.")
+    model = None
 
 # --- Database Setup ---
 def init_db():
@@ -50,9 +66,9 @@ def evaluate_answer(question, reference, student_answer, max_marks, min_words=0,
     # Word Count Analysis
     stu_words = len(student_answer.split())
     
-    # AI Ideal Answer Generation
+    # AI Ideal Answer Generation (using Gemini if available)
     ideal_answer = reference or "No reference provided."
-    if "GEMINI_API_KEY" in os.environ:
+    if model:
         try:
             ideal_prompt = f"As an expert academic, provide a concise, comprehensive, and accurate 'Gold Standard' answer for the following question. Question: {question}. {f'Teacher Hint: {reference}' if reference else ''}. Provide only the answer text."
             ideal_res = model.generate_content(ideal_prompt)
@@ -60,46 +76,88 @@ def evaluate_answer(question, reference, student_answer, max_marks, min_words=0,
         except:
             pass
     
-    # Gemini Quality & Feedback
+    # SBERT Similarity Score
+    sbert_model = load_sbert()
+    embeddings_stu = sbert_model.encode(student_answer, convert_to_tensor=True)
+    embeddings_ref = sbert_model.encode(ideal_answer, convert_to_tensor=True)
+    cosine_sim = util.cos_sim(embeddings_stu, embeddings_ref)
+    sbert_score = float(cosine_sim[0][0])
+    
+    # Quality & Feedback using Groq (Primary) or Gemini (Fallback)
     feedback = "Good attempt."
-    quality_score = 0.5
+    quality_score = sbert_score # Default to SBERT similarity
     strengths = "N/A"
     improvements = "N/A"
+    reasoning = "Evaluated using SBERT similarity."
     
-    if "GEMINI_API_KEY" in os.environ:
+    groq_client = get_groq_client()
+    
+    if groq_client:
         try:
             prompt = f"""
-            Evaluate student answer for:
+            You are an expert academic evaluator. A student has answered a question.
+            
             Question: {question}
-            AI Ideal Answer: {ideal_answer}
+            Ideal Answer: {ideal_answer}
             Student Answer: {student_answer}
+            SBERT Similarity Score: {sbert_score:.4f}
             
             Word Count Constraints:
             - Minimum Words Required: {min_words if min_words > 0 else "None"}
             - Maximum Words Allowed: {max_words if max_words > 0 else "None"}
             - Student's Actual Word Count: {stu_words}
             
-            Evaluation Guidelines:
-            1. quality_score: (0.0 to 1.0) Overall score based on accuracy, depth, and word count adherence.
-               - CRITICAL: HEAVILY PENALIZE if the word count is significantly below the minimum. 
-                 An answer that is less than 10% of the minimum word count should NEVER receive more than 10% of the marks.
-            2. strengths: A brief list of what the student did well.
-            3. improvements: A brief list of specific areas for improvement.
-            4. feedback: A detailed, justifiable, and professional summary (3-4 sentences). Explain exactly why the marks were awarded or deducted.
-
-            Provide JSON: {{"quality_score": 0.0-1.0, "strengths": "...", "improvements": "...", "feedback": "..."}}
+            Evaluation Rubric (Total 100%):
+            1. Content Accuracy (40%): How factually correct is the answer compared to the ideal answer? (Use SBERT score as a guide)
+            2. Depth & Detail (30%): Does the student provide sufficient explanation and context?
+            3. Structure & Clarity (20%): Is the answer well-organized and easy to understand?
+            4. Word Count Adherence (10%): Does the answer meet the length requirements?
+            
+            Scoring Penalties:
+            - If stu_words < ({min_words} * 0.2), Content Accuracy and Depth MUST be capped at 0.
+            - If stu_words < ({min_words} * 0.5), Content Accuracy and Depth MUST be capped at 50% of their max.
+            - If stu_words > {max_words if max_words > 0 else 999999}, apply a 10% penalty to the final score.
+            
+            Instructions:
+            - Analyze the student's answer against each rubric point.
+            - Calculate the final "quality_score" (0.0 to 1.0).
+            - Provide specific "strengths" and "improvements".
+            - Write a professional "feedback" summary.
+            
+            Return ONLY a valid JSON object:
+            {{"reasoning": "...", "quality_score": 0.0-1.0, "strengths": "...", "improvements": "...", "feedback": "..."}}
             """
-            response = model.generate_content(prompt)
-            res_json = json.loads(response.text.replace('```json', '').replace('```', ''))
-            quality_score = float(res_json.get('quality_score', 0.5))
+            chat_completion = groq_client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model="llama3-8b-8192",
+                response_format={"type": "json_object"}
+            )
+            res_json = json.loads(chat_completion.choices[0].message.content)
+            quality_score = float(res_json.get('quality_score', sbert_score))
             strengths = res_json.get('strengths', strengths)
             improvements = res_json.get('improvements', improvements)
             feedback = res_json.get('feedback', feedback)
-        except:
-            pass
+            reasoning = res_json.get('reasoning', reasoning)
+        except Exception as e:
+            print(f"Groq Evaluation Error: {e}")
+            # Fallback to Gemini if Groq fails
+            if model:
+                try:
+                    # (Existing Gemini logic here as fallback)
+                    response = model.generate_content(prompt)
+                    clean_text = response.text.replace('```json', '').replace('```', '').strip()
+                    res_json = json.loads(clean_text)
+                    quality_score = float(res_json.get('quality_score', sbert_score))
+                    strengths = res_json.get('strengths', strengths)
+                    improvements = res_json.get('improvements', improvements)
+                    feedback = res_json.get('feedback', feedback)
+                    reasoning = res_json.get('reasoning', reasoning)
+                except:
+                    pass
     
     final_score = max(0, min(max_marks, quality_score * max_marks))
-    return round(final_score, 1), feedback, strengths, improvements
+    
+    return round(final_score, 1), feedback, strengths, improvements, round(sbert_score, 4), reasoning
 
 # --- Session State ---
 if 'user' not in st.session_state:
@@ -145,7 +203,7 @@ def auth_page():
 def teacher_dashboard():
     st.header(f"Welcome, Prof. {st.session_state.user['name']}")
     
-    tab1, tab2 = st.tabs(["My Classrooms", "Create Activity"])
+    tab1, tab2, tab3 = st.tabs(["My Classrooms", "Create Activity", "Plagiarism Check"])
     
     with tab1:
         conn = get_db_connection()
@@ -174,7 +232,7 @@ def teacher_dashboard():
                     conn = get_db_connection()
                     c = conn.cursor()
                     c.execute("INSERT INTO classrooms (name, teacher_id, join_code) VALUES (?,?,?)", 
-                              (name, st.session_state.user['id'], code))
+                               (name, st.session_state.user['id'], code))
                     conn.commit()
                     conn.close()
                     st.rerun()
@@ -207,10 +265,77 @@ def teacher_dashboard():
                     conn = get_db_connection()
                     c = conn.cursor()
                     c.execute("INSERT INTO activities (title, type, classroom_id, join_code, questions) VALUES (?,?,?,?,?)", 
-                              (title, 'exam', cls_id, code, json.dumps(questions)))
+                               (title, 'exam', cls_id, code, json.dumps(questions)))
                     conn.commit()
                     conn.close()
                     st.success(f"Activity Published! Code: {code}")
+
+    with tab3:
+        st.subheader("Cross-Student Plagiarism Analysis")
+        conn = get_db_connection()
+        acts = pd.read_sql_query("""
+            SELECT a.id, a.title, c.name as classroom 
+            FROM activities a 
+            JOIN classrooms c ON a.classroom_id = c.id 
+            WHERE c.teacher_id = ?
+        """, conn, params=(st.session_state.user['id'],))
+        conn.close()
+        
+        if acts.empty:
+            st.info("No activities found.")
+        else:
+            selected_act = st.selectbox("Select Activity to Check", acts['id'], format_func=lambda x: f"{acts[acts['id']==x]['title'].values[0]} ({acts[acts['id']==x]['classroom'].values[0]})")
+            threshold = st.slider("Similarity Threshold", 0.5, 1.0, 0.85)
+            
+            if st.button("Run Plagiarism Check"):
+                with st.spinner("Analyzing submissions using SBERT..."):
+                    conn = get_db_connection()
+                    subs = pd.read_sql_query("""
+                        SELECT s.student_id, u.name, s.answers 
+                        FROM submissions s 
+                        JOIN users u ON s.student_id = u.id 
+                        WHERE s.activity_id = ?
+                    """, conn, params=(selected_act,))
+                    conn.close()
+                    
+                    if len(subs) < 2:
+                        st.warning("Need at least 2 submissions to compare.")
+                    else:
+                        sbert_model = load_sbert()
+                        results = []
+                        
+                        # Compare each question across all students
+                        num_questions = len(json.loads(subs.iloc[0]['answers']))
+                        
+                        for q_idx in range(num_questions):
+                            student_answers = []
+                            student_names = []
+                            for _, row in subs.iterrows():
+                                ans_list = json.loads(row['answers'])
+                                if q_idx < len(ans_list):
+                                    student_answers.append(ans_list[q_idx])
+                                    student_names.append(row['name'])
+                            
+                            if len(student_answers) > 1:
+                                embeddings = sbert_model.encode(student_answers, convert_to_tensor=True)
+                                cosine_matrix = util.cos_sim(embeddings, embeddings)
+                                
+                                for i in range(len(student_answers)):
+                                    for j in range(i + 1, len(student_answers)):
+                                        sim = float(cosine_matrix[i][j])
+                                        if sim >= threshold:
+                                            results.append({
+                                                "Question": q_idx + 1,
+                                                "Student 1": student_names[i],
+                                                "Student 2": student_names[j],
+                                                "Similarity": f"{sim:.2%}"
+                                            })
+                        
+                        if results:
+                            st.error(f"Found {len(results)} potential plagiarism cases!")
+                            st.table(pd.DataFrame(results))
+                        else:
+                            st.success("No plagiarism detected above the threshold.")
 
 # --- Student Dashboard ---
 def student_dashboard():
@@ -276,7 +401,7 @@ def exam_interface():
             evaluated = []
             total = 0
             for i, q in enumerate(questions):
-                score, feed, strn, imp = evaluate_answer(
+                score, feed, strn, imp, sbert, reasoning = evaluate_answer(
                     q['text'], 
                     q['referenceAnswer'], 
                     answers[i], 
@@ -290,7 +415,9 @@ def exam_interface():
                     "score": score,
                     "feedback": feed,
                     "strengths": strn,
-                    "improvements": imp
+                    "improvements": imp,
+                    "sbertScore": sbert,
+                    "reasoning": reasoning
                 })
                 total += score
             
@@ -334,7 +461,7 @@ def results_view(sub_id):
                     evaluated = []
                     total = 0
                     for i, q in enumerate(questions):
-                        score, feed, strn, imp = evaluate_answer(
+                        score, feed, strn, imp, sbert, reasoning = evaluate_answer(
                             q['text'], 
                             q['referenceAnswer'], 
                             answers[i], 
@@ -348,7 +475,9 @@ def results_view(sub_id):
                             "score": score,
                             "feedback": feed,
                             "strengths": strn,
-                            "improvements": imp
+                            "improvements": imp,
+                            "sbertScore": sbert,
+                            "reasoning": reasoning
                         })
                         total += score
                     
