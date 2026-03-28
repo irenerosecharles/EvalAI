@@ -152,8 +152,7 @@ async function startServer() {
   // Config check
   app.get("/api/config/check", (req, res) => {
     res.json({
-      groqConfigured: !!process.env.GROQ_API_KEY,
-      geminiConfigured: !!(process.env.GEMINI_API_KEY || process.env.API_KEY)
+      groqConfigured: !!process.env.GROQ_API_KEY
     });
   });
 

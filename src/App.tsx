@@ -31,99 +31,42 @@ import { cn } from './lib/utils';
 import axios from 'axios';
 import { format } from 'date-fns';
 
-declare global {
-  interface Window {
-    aistudio: {
-      hasSelectedApiKey: () => Promise<boolean>;
-      openSelectKey: () => Promise<void>;
-    };
-  }
-}
-
 // --- Axios Setup ---
 axios.interceptors.response.use(
   response => response,
-  async error => {
-    if (error.response?.status === 401 && error.response?.data?.message === 'INVALID_API_KEY') {
-      if (window.aistudio) {
-        alert("The AI evaluation system requires a valid Gemini API key. Please select one in the following dialog.");
-        await window.aistudio.openSelectKey();
-        // After selecting a key, the environment is updated. 
-        // We can't easily retry the request because it's a POST with complex data usually,
-        // but the user can now try again.
-      }
-    }
-    return Promise.reject(error);
-  }
+  error => Promise.reject(error)
 );
 
 // --- Components ---
 
 const ApiKeyGuard = ({ children }: { children: React.ReactNode }) => {
-  const [hasKey, setHasKey] = useState<boolean | null>(null);
-  const [isGroqConfigured, setIsGroqConfigured] = useState<boolean>(false);
+  const [isGroqConfigured, setIsGroqConfigured] = useState<boolean | null>(null);
 
   useEffect(() => {
-    const checkKey = async () => {
+    const checkConfig = async () => {
       try {
         const configRes = await axios.get('/api/config/check');
         setIsGroqConfigured(configRes.data.groqConfigured);
-        
-        if (configRes.data.groqConfigured) {
-          setHasKey(true);
-          return;
-        }
       } catch (err) {
         console.error("Config check failed:", err);
-      }
-
-      if (window.aistudio) {
-        const selected = await window.aistudio.hasSelectedApiKey();
-        setHasKey(selected);
-      } else {
-        // Fallback for local development or non-AI Studio environments
-        setHasKey(true);
+        setIsGroqConfigured(false);
       }
     };
-    checkKey();
+    checkConfig();
   }, []);
 
-  const handleSelectKey = async () => {
-    if (window.aistudio) {
-      await window.aistudio.openSelectKey();
-      setHasKey(true);
-      // The page will likely refresh or the environment will be updated
-      // We assume success and proceed
-    }
-  };
+  if (isGroqConfigured === null) return null;
 
-  if (hasKey === null) return null;
-
-  if (!hasKey) {
+  if (!isGroqConfigured) {
     return (
       <div className="min-h-screen bg-[#F8F9FA] flex flex-col items-center justify-center p-8 text-center">
         <div className="w-20 h-20 bg-[#1A1A1A] rounded-[2.5rem] flex items-center justify-center mb-8 shadow-2xl rotate-3">
-          <BookOpen className="text-white w-10 h-10" />
+          <ShieldAlert className="text-white w-10 h-10" />
         </div>
-        <h1 className="text-3xl font-bold mb-4 tracking-tight">AI Evaluation Requires Setup</h1>
+        <h1 className="text-3xl font-bold mb-4 tracking-tight">Configuration Required</h1>
         <p className="text-[#6B7280] mb-10 max-w-md leading-relaxed">
-          To enable high-accuracy AI grading and feedback, you must select a valid Gemini API key from a paid Google Cloud project.
-          <br /><br />
-          <a 
-            href="https://ai.google.dev/gemini-api/docs/billing" 
-            target="_blank" 
-            rel="noopener noreferrer"
-            className="text-[#1A1A1A] font-bold underline underline-offset-4"
-          >
-            Learn about billing & API keys
-          </a>
+          The AI evaluation system requires a valid GROQ_API_KEY to be configured in the environment.
         </p>
-        <button 
-          onClick={handleSelectKey}
-          className="px-10 py-4 bg-[#1A1A1A] text-white rounded-2xl font-bold hover:bg-[#333] transition-all active:scale-95 shadow-xl shadow-black/10 flex items-center gap-2"
-        >
-          Select API Key <ChevronRight size={20} />
-        </button>
       </div>
     );
   }
