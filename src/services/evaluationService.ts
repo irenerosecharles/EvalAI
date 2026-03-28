@@ -1,4 +1,3 @@
-import { GoogleGenAI, Type } from "@google/genai";
 import { pipeline, cos_sim } from '@xenova/transformers';
 import Groq from "groq-sdk";
 
@@ -34,132 +33,54 @@ export function calculateCosineSimilarity(vec1: number[], vec2: number[]) {
   return cos_sim(vec1, vec2);
 }
 
-const getApiKey = () => {
-  // Prefer API_KEY (user-selected via openSelectKey) over GEMINI_API_KEY
-  const key = (process.env.API_KEY || process.env.GEMINI_API_KEY || "").trim();
-  return key;
-};
-
-const getAi = () => {
-  const apiKey = getApiKey();
-  if (!apiKey) {
-    // If no Gemini key, we might still have Groq, so we don't throw here
-    // but we'll throw when we actually try to use Gemini.
-    return null;
-  }
-  
-  // ALWAYS create a new instance to ensure we use the most up-to-date key
-  // as per AI Studio guidelines for Gemini 3 models.
-  try {
-    return new GoogleGenAI({ apiKey });
-  } catch (e) {
-    console.error("Error initializing GoogleGenAI:", e);
-    return null;
-  }
-};
-
 const getGroq = () => {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) return null;
   return new Groq({ apiKey });
 };
 
-const MODEL_NAME = "gemini-3-flash-preview"; 
-const FALLBACK_MODEL = "gemini-3.1-flash-lite-preview";
 const GROQ_MODEL = "llama-3.3-70b-versatile";
 
 async function generateText(prompt: string, systemInstruction?: string) {
-  // 1. Try Groq first
   const groq = getGroq();
-  if (groq) {
-    try {
-      const chatCompletion = await groq.chat.completions.create({
-        messages: [
-          ...(systemInstruction ? [{ role: "system" as any, content: systemInstruction }] : []),
-          { role: "user" as any, content: prompt }
-        ],
-        model: GROQ_MODEL,
-      });
-      const text = chatCompletion.choices[0].message.content;
-      if (text) return text;
-    } catch (e: any) {
-      console.warn("Groq generation failed, falling back to Gemini...", e?.message || e);
-    }
+  if (!groq) {
+    throw new Error("GROQ_API_KEY is not configured.");
   }
 
-  // 2. Fallback to Gemini
-  const ai = getAi();
-  if (ai) {
-    try {
-      const response = await ai.models.generateContent({
-        model: MODEL_NAME,
-        contents: prompt,
-        config: { systemInstruction }
-      });
-      return response.text;
-    } catch (error: any) {
-      const errorMsg = error?.message || "";
-      if (errorMsg.includes("API key not valid") || errorMsg.includes("Requested entity was not found")) {
-        console.warn("Gemini API Key Issue (Fallback):", errorMsg);
-      } else {
-        console.warn(`Primary Gemini model ${MODEL_NAME} failed, trying fallback ${FALLBACK_MODEL}`);
-        try {
-          const response = await ai.models.generateContent({
-            model: FALLBACK_MODEL,
-            contents: prompt,
-            config: { systemInstruction }
-          });
-          return response.text;
-        } catch (e2) {
-          console.error("Gemini fallback also failed", e2);
-        }
-      }
-    }
+  try {
+    const chatCompletion = await groq.chat.completions.create({
+      messages: [
+        ...(systemInstruction ? [{ role: "system" as any, content: systemInstruction }] : []),
+        { role: "user" as any, content: prompt }
+      ],
+      model: GROQ_MODEL,
+    });
+    return chatCompletion.choices[0].message.content || null;
+  } catch (e: any) {
+    console.error("Groq generation failed:", e?.message || e);
+    return null;
   }
-
-  return null;
 }
 
-async function generateJson(prompt: string, schema?: any, systemInstruction?: string) {
-  // 1. Try Groq first
+async function generateJson(prompt: string, systemInstruction?: string) {
   const groq = getGroq();
-  if (groq) {
-    try {
-      const chatCompletion = await groq.chat.completions.create({
-        messages: [
-          ...(systemInstruction ? [{ role: "system" as any, content: systemInstruction }] : []),
-          { role: "user" as any, content: prompt }
-        ],
-        model: GROQ_MODEL,
-        response_format: { type: "json_object" }
-      });
-      const content = chatCompletion.choices[0].message.content;
-      if (content) return JSON.parse(content);
-    } catch (e: any) {
-      console.warn("Groq JSON generation failed, falling back to Gemini...", e?.message || e);
-    }
+  if (!groq) {
+    throw new Error("GROQ_API_KEY is not configured.");
   }
 
-  // 2. Fallback to Gemini
-  const ai = getAi();
-  if (ai) {
-    try {
-      const response = await ai.models.generateContent({
-        model: MODEL_NAME,
-        contents: prompt,
-        config: {
-          systemInstruction,
-          responseMimeType: "application/json",
-          responseSchema: schema
-        }
-      });
-      if (response.text) {
-        const cleanText = response.text.replace(/```json/g, '').replace(/```/g, '').trim();
-        return JSON.parse(cleanText);
-      }
-    } catch (error: any) {
-      console.warn("Gemini JSON generation failed", error?.message || error);
-    }
+  try {
+    const chatCompletion = await groq.chat.completions.create({
+      messages: [
+        ...(systemInstruction ? [{ role: "system" as any, content: systemInstruction }] : []),
+        { role: "user" as any, content: prompt }
+      ],
+      model: GROQ_MODEL,
+      response_format: { type: "json_object" }
+    });
+    const content = chatCompletion.choices[0].message.content;
+    if (content) return JSON.parse(content);
+  } catch (e: any) {
+    console.error("Groq JSON generation failed:", e?.message || e);
   }
 
   return null;
@@ -177,7 +98,7 @@ export async function evaluateAnswer(
     // 1. Word Count Analysis
     const studentWords = studentAnswer.trim().split(/\s+/).filter(w => w.length > 0).length;
 
-    // 2. Generate an "Ideal Answer"
+    // 2. Generate an "Ideal Answer" using Groq
     let idealAnswer = reference || "No ideal answer provided.";
     const idealPrompt = `As an expert academic, provide a comprehensive, accurate, and multi-faceted "Gold Standard" answer for the following question. 
     Include key concepts, terminology, and different ways the answer could be correctly expressed.
@@ -196,7 +117,7 @@ export async function evaluateAnswer(
     // 3. SBERT Calculation (Semantic Similarity)
     const sbertScore = await getSbertScore(studentAnswer, idealAnswer);
 
-    // 4. Feedback Generation
+    // 4. Feedback Generation using Groq
     const systemInstruction = "You are an expert academic evaluator known for being fair, encouraging, and liberal in awarding marks for conceptual understanding. You prioritize the 'spirit' of the answer and award partial credit generously.";
     const evaluationPrompt = `
       A student has answered a question. Evaluate their response based on the provided rubric.
@@ -236,19 +157,7 @@ export async function evaluateAnswer(
       IMPORTANT: Return ONLY a valid JSON object with keys: reasoning, score, strengths, improvements, feedback.
     `;
 
-    const schema = {
-      type: Type.OBJECT,
-      properties: {
-        reasoning: { type: Type.STRING },
-        score: { type: Type.NUMBER },
-        strengths: { type: Type.STRING },
-        improvements: { type: Type.STRING },
-        feedback: { type: Type.STRING }
-      },
-      required: ["reasoning", "score", "strengths", "improvements", "feedback"]
-    };
-
-    const result = await generateJson(evaluationPrompt, schema, systemInstruction);
+    const result = await generateJson(evaluationPrompt, systemInstruction);
 
     if (!result) {
       // Fallback with a slightly more liberal SBERT interpretation

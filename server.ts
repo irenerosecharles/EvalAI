@@ -10,8 +10,7 @@ import cors from "cors";
 import Database from "better-sqlite3";
 import { evaluateAnswer, getEmbeddings, calculateCosineSimilarity } from "./src/services/evaluationService.ts";
 
-console.log("GEMINI_API_KEY present:", !!process.env.GEMINI_API_KEY);
-console.log("API_KEY present:", !!process.env.API_KEY);
+console.log("GROQ_API_KEY present:", !!process.env.GROQ_API_KEY);
 
 const JWT_SECRET = process.env.JWT_SECRET || "evalai-secret-key";
 const db = new Database("evalai.db");
