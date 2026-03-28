@@ -24,6 +24,8 @@ db.exec(`
     email TEXT UNIQUE NOT NULL,
     password TEXT NOT NULL,
     role TEXT CHECK(role IN ('teacher', 'student')) NOT NULL,
+    securityQuestion TEXT,
+    securityAnswer TEXT,
     createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -64,7 +66,7 @@ db.exec(`
     answers TEXT NOT NULL, -- JSON string
     evaluatedAnswers TEXT, -- JSON string
     totalScore REAL DEFAULT 0,
-    status TEXT CHECK(status IN ('draft', 'submitted', 'evaluated', 'manual_review')) DEFAULT 'submitted',
+    status TEXT CHECK(status IN ('draft', 'submitted', 'evaluated', 'manual_review', 'late_submission')) DEFAULT 'submitted',
     reevaluationCount INTEGER DEFAULT 0,
     humanEvalRequested INTEGER DEFAULT 0,
     manualGrade REAL,
@@ -85,21 +87,38 @@ db.exec(`
 `);
 
 // Migration: Add new columns if they don't exist
-const columnsToAdd = [
+const submissionsColumns = [
   { name: 'reevaluationCount', type: 'INTEGER DEFAULT 0' },
   { name: 'humanEvalRequested', type: 'INTEGER DEFAULT 0' },
   { name: 'manualGrade', type: 'REAL' },
   { name: 'manualFeedback', type: 'TEXT' }
 ];
 
-for (const col of columnsToAdd) {
+for (const col of submissionsColumns) {
   try {
     db.prepare(`SELECT ${col.name} FROM submissions LIMIT 1`).get();
   } catch (e) {
     try {
       db.exec(`ALTER TABLE submissions ADD COLUMN ${col.name} ${col.type}`);
     } catch (err) {
-      console.error(`Migration failed for ${col.name}:`, err);
+      console.error(`Migration failed for submissions.${col.name}:`, err);
+    }
+  }
+}
+
+const usersColumns = [
+  { name: 'securityQuestion', type: 'TEXT' },
+  { name: 'securityAnswer', type: 'TEXT' }
+];
+
+for (const col of usersColumns) {
+  try {
+    db.prepare(`SELECT ${col.name} FROM users LIMIT 1`).get();
+  } catch (e) {
+    try {
+      db.exec(`ALTER TABLE users ADD COLUMN ${col.name} ${col.type}`);
+    } catch (err) {
+      console.error(`Migration failed for users.${col.name}:`, err);
     }
   }
 }
@@ -141,15 +160,46 @@ async function startServer() {
 
   // Auth
   app.post("/api/auth/register", async (req, res) => {
-    const { name, email, password, role } = req.body;
+    const { name, email, password, role, securityQuestion, securityAnswer } = req.body;
     try {
       const hashedPassword = await bcrypt.hash(password, 10);
-      const stmt = db.prepare("INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, ?)");
-      stmt.run(name, email, hashedPassword, role);
+      const hashedAnswer = securityAnswer ? await bcrypt.hash(securityAnswer.toLowerCase().trim(), 10) : null;
+      const stmt = db.prepare("INSERT INTO users (name, email, password, role, securityQuestion, securityAnswer) VALUES (?, ?, ?, ?, ?, ?)");
+      stmt.run(name, email, hashedPassword, role, securityQuestion, hashedAnswer);
       res.status(201).json({ message: "User registered" });
     } catch (err: any) {
       console.error("Registration error:", err);
       res.status(400).json({ message: err.message.includes("UNIQUE") ? "Email already exists" : "Registration failed" });
+    }
+  });
+
+  app.post("/api/auth/forgot-password", async (req, res) => {
+    const { email } = req.body;
+    try {
+      const user = db.prepare("SELECT securityQuestion FROM users WHERE email = ?").get(email) as any;
+      if (!user) return res.status(404).json({ message: "User not found" });
+      res.json({ securityQuestion: user.securityQuestion });
+    } catch (err) {
+      res.status(500).json({ message: "Error fetching security question" });
+    }
+  });
+
+  app.post("/api/auth/reset-password", async (req, res) => {
+    const { email, securityAnswer, newPassword } = req.body;
+    try {
+      const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email) as any;
+      if (!user) return res.status(404).json({ message: "User not found" });
+
+      if (!user.securityAnswer) return res.status(400).json({ message: "No security answer set for this user" });
+
+      const isAnswerCorrect = await bcrypt.compare(securityAnswer.toLowerCase().trim(), user.securityAnswer);
+      if (!isAnswerCorrect) return res.status(400).json({ message: "Incorrect security answer" });
+
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      db.prepare("UPDATE users SET password = ? WHERE id = ?").run(hashedPassword, user.id);
+      res.json({ message: "Password reset successfully" });
+    } catch (err) {
+      res.status(500).json({ message: "Error resetting password" });
     }
   });
 
@@ -230,9 +280,18 @@ async function startServer() {
     })));
   });
 
-  app.get("/api/activities/detail/:id", authenticate, (req, res) => {
+  app.get("/api/activities/detail/:id", authenticate, (req: any, res) => {
     const activity = db.prepare("SELECT * FROM activities WHERE id = ?").get(req.params.id) as any;
     if (!activity) return res.status(404).json({ message: "Activity not found" });
+
+    // If student, check if already submitted
+    if (req.user.role === 'student') {
+      const existingSubmission = db.prepare("SELECT id FROM submissions WHERE activityId = ? AND studentId = ?").get(req.params.id, req.user.id);
+      if (existingSubmission) {
+        return res.status(403).json({ message: "You have already submitted this activity." });
+      }
+    }
+
     res.json({ ...activity, _id: activity.id, questions: JSON.parse(activity.questions) });
   });
 
@@ -279,6 +338,19 @@ async function startServer() {
     const { activityId, answers } = req.body;
     const activity = db.prepare("SELECT * FROM activities WHERE id = ?").get(activityId) as any;
     if (!activity) return res.status(404).json({ message: "Activity not found" });
+
+    // Check for existing submission
+    const existingSubmission = db.prepare("SELECT id FROM submissions WHERE activityId = ? AND studentId = ?").get(activityId, req.user.id);
+    if (existingSubmission) {
+      return res.status(400).json({ message: "You have already submitted this activity." });
+    }
+
+    // Check for deadline
+    if (activity.deadline && new Date() > new Date(activity.deadline)) {
+      db.prepare("INSERT INTO submissions (activityId, studentId, answers, status) VALUES (?, ?, ?, ?)")
+        .run(activityId, req.user.id, JSON.stringify(answers), 'late_submission');
+      return res.status(400).json({ message: "Submission rejected: Deadline has passed." });
+    }
 
     const questions = JSON.parse(activity.questions);
 
@@ -436,6 +508,57 @@ async function startServer() {
       WHERE c.teacherId = ? AND s.humanEvalRequested = 1
     `).all(req.user.id);
     res.json(requests.map((r: any) => ({ ...r, _id: r.id })));
+  });
+
+  app.get("/api/submissions/student/report", authenticate, (req: any, res) => {
+    const report = db.prepare(`
+      SELECT s.*, a.title as activityTitle, a.type as activityType, a.questions as activityQuestions
+      FROM submissions s
+      JOIN activities a ON s.activityId = a.id
+      WHERE s.studentId = ?
+    `).all(req.user.id);
+
+    const formattedReport = report.map((r: any) => {
+      const questions = JSON.parse(r.activityQuestions);
+      const maxPossibleMarks = questions.reduce((acc: number, curr: any) => acc + (curr.maxMarks || 10), 0);
+      return {
+        id: r.id,
+        activityId: r.activityId,
+        activityTitle: r.activityTitle,
+        activityType: r.activityType,
+        totalScore: r.totalScore,
+        maxPossibleMarks,
+        status: r.status,
+        submittedAt: r.submittedAt
+      };
+    });
+
+    res.json(formattedReport);
+  });
+
+  app.get("/api/submissions/teacher/export/:activityId", authenticate, isTeacher, (req: any, res) => {
+    const activityId = req.params.activityId;
+    const submissions = db.prepare(`
+      SELECT s.*, u.name as studentName, u.email as studentEmail
+      FROM submissions s
+      JOIN users u ON s.studentId = u.id
+      WHERE s.activityId = ?
+    `).all(activityId);
+
+    const activity = db.prepare("SELECT title, questions FROM activities WHERE id = ?").get(activityId) as any;
+    const questions = JSON.parse(activity.questions);
+    const maxPossibleMarks = questions.reduce((acc: number, curr: any) => acc + (curr.maxMarks || 10), 0);
+
+    // Generate CSV
+    let csv = "Student Name,Email,Score,Total Possible,Submitted Time\n";
+    submissions.forEach((s: any) => {
+      const submittedTime = s.submittedAt ? new Date(s.submittedAt).toLocaleString() : 'N/A';
+      csv += `"${s.studentName}","${s.studentEmail}",${s.totalScore},${maxPossibleMarks},"${submittedTime}"\n`;
+    });
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename=results_${activity.title.replace(/\s+/g, '_')}.csv`);
+    res.send(csv);
   });
 
   app.get("/api/submissions/activity/:activityId", authenticate, (req: any, res) => {

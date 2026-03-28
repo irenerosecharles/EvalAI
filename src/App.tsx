@@ -21,7 +21,8 @@ import {
   Check,
   ShieldAlert,
   MessageSquare,
-  UserCheck
+  UserCheck,
+  Calendar
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useParams, Navigate } from 'react-router-dom';
@@ -326,7 +327,10 @@ const Login = () => {
             </div>
           </div>
           <div>
-            <label className="block text-[10px] font-bold text-[#6B7280] uppercase tracking-widest mb-2 ml-1">Security Key</label>
+            <div className="flex justify-between items-center mb-2 ml-1">
+              <label className="block text-[10px] font-bold text-[#6B7280] uppercase tracking-widest">Security Key</label>
+              <Link to="/forgot-password" size="sm" className="text-[10px] font-bold text-[#1A1A1A] hover:underline">Forgot?</Link>
+            </div>
             <div className="relative">
               <input 
                 type="password" 
@@ -359,11 +363,129 @@ const Login = () => {
   );
 };
 
+const ForgotPassword = () => {
+  const [email, setEmail] = useState('');
+  const [securityQuestion, setSecurityQuestion] = useState('');
+  const [securityAnswer, setSecurityAnswer] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [step, setStep] = useState(1);
+  const [isLoading, setIsLoading] = useState(false);
+  const navigate = useNavigate();
+
+  const handleFetchQuestion = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsLoading(true);
+    try {
+      const res = await axios.post('/api/auth/forgot-password', { email });
+      setSecurityQuestion(res.data.securityQuestion);
+      setStep(2);
+    } catch (err: any) {
+      alert(err.response?.data?.message || 'User not found.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsLoading(true);
+    try {
+      await axios.post('/api/auth/reset-password', { email, securityAnswer, newPassword });
+      alert('Password reset successfully. Please login with your new password.');
+      navigate('/login');
+    } catch (err: any) {
+      alert(err.response?.data?.message || 'Reset failed. Please check your answer.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-[#F8F9FA] flex items-center justify-center p-4">
+      <motion.div 
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="w-full max-w-md bg-white p-10 rounded-[2.5rem] border border-[#E5E7EB] shadow-2xl relative overflow-hidden"
+      >
+        <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-[#1A1A1A] via-[#4B5563] to-[#1A1A1A]" />
+        
+        <div className="text-center mb-10">
+          <h1 className="text-3xl font-bold tracking-tight text-[#111827]">Reset Access</h1>
+          <p className="text-[#6B7280] text-sm mt-2 font-medium">Recover your academic credentials</p>
+        </div>
+
+        {step === 1 ? (
+          <form onSubmit={handleFetchQuestion} className="space-y-5">
+            <div>
+              <label className="block text-[10px] font-bold text-[#6B7280] uppercase tracking-widest mb-2 ml-1">Institutional Email</label>
+              <input 
+                type="email" 
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                className="w-full px-4 py-3.5 bg-[#F9FAFB] border border-[#E5E7EB] rounded-2xl focus:ring-2 focus:ring-[#1A1A1A] focus:bg-white outline-none transition-all text-sm"
+                placeholder="name@university.edu"
+                required
+              />
+            </div>
+            <button 
+              disabled={isLoading}
+              className="w-full py-4 bg-[#1A1A1A] text-white rounded-2xl font-bold hover:bg-[#333] transition-all active:scale-[0.98] mt-6 shadow-lg shadow-black/10 disabled:opacity-70 flex items-center justify-center gap-2"
+            >
+              {isLoading ? 'Verifying...' : 'Continue'}
+              {!isLoading && <ChevronRight size={18} />}
+            </button>
+          </form>
+        ) : (
+          <form onSubmit={handleReset} className="space-y-5">
+            <div>
+              <label className="block text-[10px] font-bold text-[#6B7280] uppercase tracking-widest mb-2 ml-1">Security Question</label>
+              <div className="p-4 bg-[#F3F4F6] rounded-2xl text-sm font-medium text-[#1A1A1A] mb-4">
+                {securityQuestion}
+              </div>
+              <label className="block text-[10px] font-bold text-[#6B7280] uppercase tracking-widest mb-2 ml-1">Your Answer</label>
+              <input 
+                type="text" 
+                value={securityAnswer}
+                onChange={e => setSecurityAnswer(e.target.value)}
+                className="w-full px-4 py-3.5 bg-[#F9FAFB] border border-[#E5E7EB] rounded-2xl focus:ring-2 focus:ring-[#1A1A1A] focus:bg-white outline-none transition-all text-sm mb-4"
+                placeholder="Answer"
+                required
+              />
+              <label className="block text-[10px] font-bold text-[#6B7280] uppercase tracking-widest mb-2 ml-1">New Security Key</label>
+              <input 
+                type="password" 
+                value={newPassword}
+                onChange={e => setNewPassword(e.target.value)}
+                className="w-full px-4 py-3.5 bg-[#F9FAFB] border border-[#E5E7EB] rounded-2xl focus:ring-2 focus:ring-[#1A1A1A] focus:bg-white outline-none transition-all text-sm"
+                placeholder="••••••••"
+                required
+              />
+            </div>
+            <button 
+              disabled={isLoading}
+              className="w-full py-4 bg-[#1A1A1A] text-white rounded-2xl font-bold hover:bg-[#333] transition-all active:scale-[0.98] mt-6 shadow-lg shadow-black/10 disabled:opacity-70 flex items-center justify-center gap-2"
+            >
+              {isLoading ? 'Resetting...' : 'Reset Password'}
+              {!isLoading && <ChevronRight size={18} />}
+            </button>
+          </form>
+        )}
+
+        <div className="mt-10 pt-8 border-t border-[#F3F4F6] text-center">
+          <button onClick={() => navigate('/login')} className="text-sm text-[#6B7280] font-bold hover:underline decoration-2 underline-offset-4">Back to Login</button>
+        </div>
+      </motion.div>
+    </div>
+  );
+};
+
 const Register = () => {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState<'teacher' | 'student'>('student');
+  const [securityQuestion, setSecurityQuestion] = useState('');
+  const [securityAnswer, setSecurityAnswer] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const navigate = useNavigate();
 
@@ -371,7 +493,7 @@ const Register = () => {
     e.preventDefault();
     setIsLoading(true);
     try {
-      await axios.post('/api/auth/register', { name, email, password, role });
+      await axios.post('/api/auth/register', { name, email, password, role, securityQuestion, securityAnswer });
       alert('Academic credentials established successfully. Proceeding to login.');
       navigate('/login');
     } catch (err: any) {
@@ -449,6 +571,33 @@ const Register = () => {
               onChange={e => setPassword(e.target.value)}
               className="w-full px-4 py-3.5 bg-[#F9FAFB] border border-[#E5E7EB] rounded-2xl focus:ring-2 focus:ring-[#1A1A1A] focus:bg-white outline-none transition-all text-sm"
               placeholder="••••••••"
+              required
+            />
+          </div>
+
+          <div>
+            <label className="block text-[10px] font-bold text-[#6B7280] uppercase tracking-widest mb-2 ml-1">Security Question</label>
+            <select 
+              value={securityQuestion}
+              onChange={e => setSecurityQuestion(e.target.value)}
+              className="w-full px-4 py-3.5 bg-[#F9FAFB] border border-[#E5E7EB] rounded-2xl focus:ring-2 focus:ring-[#1A1A1A] focus:bg-white outline-none transition-all text-sm"
+              required
+            >
+              <option value="">Select a question</option>
+              <option value="What was your first pet's name?">What was your first pet's name?</option>
+              <option value="What is your mother's maiden name?">What is your mother's maiden name?</option>
+              <option value="What city were you born in?">What city were you born in?</option>
+              <option value="What was the name of your first school?">What was the name of your first school?</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-[10px] font-bold text-[#6B7280] uppercase tracking-widest mb-2 ml-1">Security Answer</label>
+            <input 
+              type="text" 
+              value={securityAnswer}
+              onChange={e => setSecurityAnswer(e.target.value)}
+              className="w-full px-4 py-3.5 bg-[#F9FAFB] border border-[#E5E7EB] rounded-2xl focus:ring-2 focus:ring-[#1A1A1A] focus:bg-white outline-none transition-all text-sm"
+              placeholder="Your answer"
               required
             />
           </div>
@@ -1078,7 +1227,7 @@ const ClassroomDetail = () => {
                   </div>
                 </div>
 
-                {newActivity.type === 'assignment' ? (
+                <div className={cn("grid gap-4", newActivity.type === 'exam' ? "grid-cols-2" : "grid-cols-1")}>
                   <div>
                     <label className="block text-xs font-semibold text-[#6B7280] uppercase mb-1.5 ml-1">Deadline</label>
                     <input 
@@ -1088,17 +1237,18 @@ const ClassroomDetail = () => {
                       className="w-full px-4 py-3 bg-[#F9FAFB] border border-[#E5E7EB] rounded-xl outline-none"
                     />
                   </div>
-                ) : (
-                  <div>
-                    <label className="block text-xs font-semibold text-[#6B7280] uppercase mb-1.5 ml-1">Duration (Minutes)</label>
-                    <input 
-                      type="number" 
-                      value={newActivity.duration}
-                      onChange={e => setNewActivity({...newActivity, duration: parseInt(e.target.value)})}
-                      className="w-full px-4 py-3 bg-[#F9FAFB] border border-[#E5E7EB] rounded-xl outline-none"
-                    />
-                  </div>
-                )}
+                  {newActivity.type === 'exam' && (
+                    <div>
+                      <label className="block text-xs font-semibold text-[#6B7280] uppercase mb-1.5 ml-1">Duration (Minutes)</label>
+                      <input 
+                        type="number" 
+                        value={newActivity.duration}
+                        onChange={e => setNewActivity({...newActivity, duration: parseInt(e.target.value)})}
+                        className="w-full px-4 py-3 bg-[#F9FAFB] border border-[#E5E7EB] rounded-xl outline-none"
+                      />
+                    </div>
+                  )}
+                </div>
 
                 <div className="space-y-4">
                   <div className="flex justify-between items-center">
@@ -1213,6 +1363,7 @@ const ClassroomDetail = () => {
 
 const StudentDashboard = () => {
   const [classrooms, setClassrooms] = useState<any[]>([]);
+  const [report, setReport] = useState<any[]>([]);
   const [joinCode, setJoinCode] = useState('');
   const [isJoining, setIsJoining] = useState(false);
   const { token } = useAuth();
@@ -1220,6 +1371,7 @@ const StudentDashboard = () => {
 
   useEffect(() => {
     fetchClassrooms();
+    fetchReport();
   }, []);
 
   const fetchClassrooms = async () => {
@@ -1229,6 +1381,15 @@ const StudentDashboard = () => {
     } catch (err) {
       console.error("Failed to fetch classrooms:", err);
       setClassrooms([]);
+    }
+  };
+
+  const fetchReport = async () => {
+    try {
+      const res = await axios.get('/api/submissions/student/report', { headers: { Authorization: `Bearer ${token}` } });
+      setReport(res.data);
+    } catch (err) {
+      console.error("Failed to fetch report:", err);
     }
   };
 
@@ -1280,6 +1441,48 @@ const StudentDashboard = () => {
               ))}
             </div>
           </div>
+
+          {report.length > 0 && (
+            <div className="space-y-6">
+              <h2 className="text-xl font-bold flex items-center gap-2">
+                <BarChart3 size={20} /> Performance Report
+              </h2>
+              <div className="bg-white rounded-3xl border border-[#E5E7EB] overflow-hidden shadow-sm">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-[#F9FAFB] border-b border-[#E5E7EB]">
+                      <th className="px-6 py-4 text-xs font-bold text-[#6B7280] uppercase tracking-widest">Activity</th>
+                      <th className="px-6 py-4 text-xs font-bold text-[#6B7280] uppercase tracking-widest">Type</th>
+                      <th className="px-6 py-4 text-xs font-bold text-[#6B7280] uppercase tracking-widest">Score</th>
+                      <th className="px-6 py-4 text-xs font-bold text-[#6B7280] uppercase tracking-widest text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {report.map((r: any) => (
+                      <tr key={r.id} className="border-b border-[#E5E7EB] hover:bg-[#F9FAFB] transition-colors">
+                        <td className="px-6 py-4 font-bold">{r.activityTitle}</td>
+                        <td className="px-6 py-4">
+                          <span className={cn(
+                            "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase",
+                            r.activityType === 'exam' ? "bg-red-50 text-red-600" : "bg-green-50 text-green-600"
+                          )}>
+                            {r.activityType}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4">
+                          <span className="font-bold text-[#1A1A1A]">{r.totalScore}</span>
+                          <span className="text-[#9CA3AF] text-xs"> / {r.maxPossibleMarks}</span>
+                        </td>
+                        <td className="px-6 py-4 text-right">
+                          <Link to={`/activity/${r.activityId}/results`} className="text-xs font-bold text-[#1A1A1A] hover:underline">View Report</Link>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="space-y-6">
@@ -1311,6 +1514,10 @@ const StudentDashboard = () => {
                 <span className="text-sm text-[#6B7280]">Enrolled Classes</span>
                 <span className="text-sm font-bold">{classrooms.length}</span>
               </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-[#6B7280]">Completed Activities</span>
+                <span className="text-sm font-bold">{report.length}</span>
+              </div>
               <div className="p-4 bg-[#F9FAFB] rounded-2xl border border-[#E5E7EB] text-[10px] text-[#6B7280] leading-relaxed italic">
                 Join activities using codes provided by your teacher to begin evaluations.
               </div>
@@ -1325,13 +1532,25 @@ const StudentDashboard = () => {
 const StudentClassroomDetail = () => {
   const { id } = useParams();
   const [activities, setActivities] = useState<any[]>([]);
+  const [submissions, setSubmissions] = useState<any[]>([]);
   const { token } = useAuth();
 
   useEffect(() => {
-    axios.get(`/api/activities/${id}`, { headers: { Authorization: `Bearer ${token}` } })
-      .then(res => setActivities(res.data))
-      .catch(console.error);
+    fetchData();
   }, [id]);
+
+  const fetchData = async () => {
+    try {
+      const [actRes, subRes] = await Promise.all([
+        axios.get(`/api/activities/${id}`, { headers: { Authorization: `Bearer ${token}` } }),
+        axios.get('/api/submissions/student/report', { headers: { Authorization: `Bearer ${token}` } })
+      ]);
+      setActivities(actRes.data);
+      setSubmissions(subRes.data);
+    } catch (err) {
+      console.error(err);
+    }
+  };
 
   return (
     <div className="p-8 max-w-7xl mx-auto">
@@ -1343,41 +1562,75 @@ const StudentClassroomDetail = () => {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {activities.map(act => (
-          <div key={act._id} className="bg-white p-6 rounded-3xl border border-[#E5E7EB] shadow-sm flex flex-col">
-            <div className="flex justify-between items-start mb-4">
-              <div className={cn(
-                "px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider",
-                act.type === 'exam' ? "bg-[#FEF2F2] text-[#DC2626]" : "bg-[#F0FDF4] text-[#16A34A]"
-              )}>
-                {act.type}
+        {activities.map(act => {
+          const submission = submissions.find(s => s.activityId === act._id);
+          const isDeadlinePassed = act.deadline && new Date() > new Date(act.deadline);
+          
+          return (
+            <div key={act._id} className="bg-white p-6 rounded-3xl border border-[#E5E7EB] shadow-sm flex flex-col">
+              <div className="flex justify-between items-start mb-4">
+                <div className={cn(
+                  "px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider",
+                  act.type === 'exam' ? "bg-[#FEF2F2] text-[#DC2626]" : "bg-[#F0FDF4] text-[#16A34A]"
+                )}>
+                  {act.type}
+                </div>
+                {submission && (
+                  <div className="px-3 py-1 bg-[#1A1A1A] text-white rounded-full text-[10px] font-bold uppercase tracking-wider">
+                    Submitted
+                  </div>
+                )}
+                {!submission && isDeadlinePassed && (
+                  <div className="px-3 py-1 bg-red-600 text-white rounded-full text-[10px] font-bold uppercase tracking-wider">
+                    Deadline Passed
+                  </div>
+                )}
+              </div>
+              <h3 className="text-xl font-bold mb-2">{act.title}</h3>
+              <div className="flex items-center gap-4 text-sm text-[#6B7280] mb-8">
+                <div className="flex items-center gap-1">
+                  <FileText size={16} /> {act.questions.length} Questions
+                </div>
+                {act.deadline && (
+                  <div className="flex items-center gap-1">
+                    <Calendar size={16} /> {format(new Date(act.deadline), 'MMM d, h:mm a')}
+                  </div>
+                )}
+                {act.duration && (
+                  <div className="flex items-center gap-1">
+                    <Clock size={16} /> {act.duration}m
+                  </div>
+                )}
+              </div>
+              <div className="mt-auto flex gap-3">
+                {submission ? (
+                  <Link 
+                    to={`/activity/${act._id}/results`}
+                    className="flex-1 flex items-center justify-center gap-2 py-3 bg-[#F3F4F6] text-[#1A1A1A] rounded-xl font-semibold hover:bg-[#E5E7EB] transition-all"
+                  >
+                    <BarChart3 size={18} /> View Results
+                  </Link>
+                ) : (
+                  isDeadlinePassed ? (
+                    <button 
+                      disabled
+                      className="flex-1 flex items-center justify-center gap-2 py-3 bg-[#F3F4F6] text-[#9CA3AF] rounded-xl font-semibold cursor-not-allowed"
+                    >
+                      <ShieldAlert size={18} /> Access Closed
+                    </button>
+                  ) : (
+                    <Link 
+                      to={`/activity/${act._id}/take`}
+                      className="flex-1 flex items-center justify-center gap-2 py-3 bg-[#1A1A1A] text-white rounded-xl font-semibold hover:bg-[#333] transition-all"
+                    >
+                      <Send size={18} /> Start Activity
+                    </Link>
+                  )
+                )}
               </div>
             </div>
-            <h3 className="text-xl font-bold mb-2">{act.title}</h3>
-            <div className="flex items-center gap-4 text-sm text-[#6B7280] mb-8">
-              <div className="flex items-center gap-1">
-                <FileText size={16} /> {act.questions.length} Questions
-              </div>
-              <div className="flex items-center gap-1">
-                <Clock size={16} /> {act.type === 'assignment' ? format(new Date(act.deadline), 'MMM d') : `${act.duration}m`}
-              </div>
-            </div>
-            <div className="mt-auto flex gap-3">
-              <Link 
-                to={`/activity/${act._id}/take`}
-                className="flex-1 flex items-center justify-center gap-2 py-3 bg-[#1A1A1A] text-white rounded-xl font-semibold hover:bg-[#333] transition-all"
-              >
-                <Send size={18} /> Start Activity
-              </Link>
-              <Link 
-                to={`/activity/${act._id}/results`}
-                className="px-4 flex items-center justify-center bg-[#F3F4F6] text-[#1A1A1A] rounded-xl hover:bg-[#E5E7EB] transition-all"
-              >
-                <BarChart3 size={18} />
-              </Link>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
@@ -1406,8 +1659,9 @@ const ExamInterface = () => {
       } else {
         setTimeLeft(3600); // Default 1 hour if no duration
       }
-    } catch (err) {
-      alert('Failed to load activity');
+    } catch (err: any) {
+      const message = err.response?.data?.message || 'Failed to load activity';
+      alert(message);
       navigate('/');
     }
   };
@@ -1627,6 +1881,24 @@ const ResultsView = () => {
     }
   };
 
+  const handleDownloadCSV = async () => {
+    try {
+      const res = await axios.get(`/api/submissions/teacher/export/${id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        responseType: 'blob'
+      });
+      const url = window.URL.createObjectURL(new Blob([res.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `results_${id}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (err) {
+      alert('Download failed. Please try again later.');
+    }
+  };
+
   if (submissions.length === 0) return (
     <div className="p-20 text-center text-[#6B7280]">
       <AlertCircle size={48} className="mx-auto mb-4 opacity-20" />
@@ -1642,6 +1914,12 @@ const ResultsView = () => {
             <h1 className="text-3xl font-bold tracking-tight">Activity Submissions</h1>
             <p className="text-[#6B7280] mt-1">Review student performance and marks</p>
           </div>
+          <button 
+            onClick={handleDownloadCSV}
+            className="flex items-center gap-2 px-6 py-3 bg-[#1A1A1A] text-white rounded-2xl font-semibold hover:bg-[#333] transition-all"
+          >
+            <Download size={20} /> Download Results (CSV)
+          </button>
         </div>
 
         <div className="bg-white rounded-3xl border border-[#E5E7EB] overflow-hidden shadow-sm">
@@ -1863,6 +2141,7 @@ const AppContent = () => {
       <Routes>
         <Route path="/login" element={!user ? <Login /> : <Navigate to="/" />} />
         <Route path="/register" element={!user ? <Register /> : <Navigate to="/" />} />
+        <Route path="/forgot-password" element={!user ? <ForgotPassword /> : <Navigate to="/" />} />
         
         <Route path="/" element={
           user ? (
