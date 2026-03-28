@@ -19,7 +19,9 @@ import {
   X,
   Copy,
   Check,
-  ShieldAlert
+  ShieldAlert,
+  MessageSquare,
+  UserCheck
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useParams, Navigate } from 'react-router-dom';
@@ -473,18 +475,49 @@ const TeacherDashboard = () => {
   const [classrooms, setClassrooms] = useState<any[]>([]);
   const [showCreateClass, setShowCreateClass] = useState(false);
   const [newClassName, setNewClassName] = useState('');
-  const [activeTab, setActiveTab] = useState<'classrooms' | 'plagiarism'>('classrooms');
-  const [plagiarismResults, setPlagiarismResults] = useState<any[]>([]);
-  const [selectedActivity, setSelectedActivity] = useState('');
-  const [threshold, setThreshold] = useState(0.85);
-  const [isChecking, setIsChecking] = useState(false);
+  const [activeTab, setActiveTab] = useState<'classrooms' | 'requests'>('classrooms');
   const [allActivities, setAllActivities] = useState<any[]>([]);
+  const [humanEvalRequests, setHumanEvalRequests] = useState<any[]>([]);
+  const [isManualGrading, setIsManualGrading] = useState(false);
+  const [manualGrade, setManualGrade] = useState('');
+  const [manualFeedback, setManualFeedback] = useState('');
+  const [gradingSubmission, setGradingSubmission] = useState<any>(null);
   const { token } = useAuth();
 
   useEffect(() => {
     fetchClassrooms();
     fetchAllActivities();
+    fetchHumanEvalRequests();
   }, []);
+
+  const fetchHumanEvalRequests = async () => {
+    try {
+      const res = await axios.get('/api/submissions/teacher/requests', { headers: { Authorization: `Bearer ${token}` } });
+      setHumanEvalRequests(res.data);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const submitManualGrade = async () => {
+    if (!gradingSubmission || !manualGrade) return;
+    setIsManualGrading(true);
+    try {
+      await axios.post(`/api/submissions/${gradingSubmission._id}/manual-grade`, {
+        grade: parseFloat(manualGrade),
+        feedback: manualFeedback
+      }, { headers: { Authorization: `Bearer ${token}` } });
+      alert('Manual grade saved successfully.');
+      setGradingSubmission(null);
+      setManualGrade('');
+      setManualFeedback('');
+      fetchHumanEvalRequests();
+    } catch (err) {
+      alert('Failed to save manual grade.');
+    } finally {
+      setIsManualGrading(false);
+    }
+  };
 
   const fetchClassrooms = async () => {
     try {
@@ -511,21 +544,6 @@ const TeacherDashboard = () => {
     setNewClassName('');
     setShowCreateClass(false);
     fetchClassrooms();
-  };
-
-  const runPlagiarismCheck = async () => {
-    if (!selectedActivity) return;
-    setIsChecking(true);
-    try {
-      const res = await axios.get(`/api/plagiarism/${selectedActivity}?threshold=${threshold}`, { 
-        headers: { Authorization: `Bearer ${token}` } 
-      });
-      setPlagiarismResults(res.data.matches);
-    } catch (err) {
-      alert('Plagiarism check failed');
-    } finally {
-      setIsChecking(false);
-    }
   };
 
   return (
@@ -558,15 +576,20 @@ const TeacherDashboard = () => {
           {activeTab === 'classrooms' && <motion.div layoutId="tab" className="absolute bottom-0 left-0 right-0 h-1 bg-[#1A1A1A] rounded-t-full" />}
         </button>
         <button 
-          onClick={() => setActiveTab('plagiarism')}
+          onClick={() => setActiveTab('requests')}
           className={cn(
             "pb-4 text-sm font-bold tracking-widest uppercase transition-all relative flex items-center gap-2",
-            activeTab === 'plagiarism' ? "text-[#1A1A1A]" : "text-[#9CA3AF] hover:text-[#6B7280]"
+            activeTab === 'requests' ? "text-[#1A1A1A]" : "text-[#9CA3AF] hover:text-[#6B7280]"
           )}
         >
-          <ShieldAlert size={16} />
-          Plagiarism Check
-          {activeTab === 'plagiarism' && <motion.div layoutId="tab" className="absolute bottom-0 left-0 right-0 h-1 bg-[#1A1A1A] rounded-t-full" />}
+          <MessageSquare size={16} />
+          Evaluation Requests
+          {humanEvalRequests.length > 0 && (
+            <span className="absolute -top-1 -right-2 w-4 h-4 bg-[#DC2626] text-white text-[8px] flex items-center justify-center rounded-full font-bold">
+              {humanEvalRequests.length}
+            </span>
+          )}
+          {activeTab === 'requests' && <motion.div layoutId="tab" className="absolute bottom-0 left-0 right-0 h-1 bg-[#1A1A1A] rounded-t-full" />}
         </button>
       </div>
 
@@ -598,94 +621,105 @@ const TeacherDashboard = () => {
       ) : (
         <div className="space-y-8">
           <div className="bg-white p-8 rounded-[2.5rem] border border-[#E5E7EB] shadow-sm">
-            <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
-              <ShieldAlert className="text-[#DC2626]" /> Plagiarism Detection System
+            <h3 className="text-xl font-bold mb-2 flex items-center gap-2">
+              <MessageSquare className="text-[#1A1A1A]" /> Human Evaluation Requests
             </h3>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-end">
-              <div>
-                <label className="block text-[10px] font-bold text-[#6B7280] uppercase tracking-widest mb-2 ml-1">Select Activity</label>
-                <select 
-                  value={selectedActivity}
-                  onChange={e => setSelectedActivity(e.target.value)}
-                  className="w-full px-4 py-3 bg-[#F9FAFB] border border-[#E5E7EB] rounded-2xl outline-none focus:ring-2 focus:ring-[#1A1A1A]"
-                >
-                  <option value="">Choose an activity...</option>
-                  {allActivities.map(act => (
-                    <option key={act._id} value={act._id}>{act.title} ({act.classroomName})</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-[10px] font-bold text-[#6B7280] uppercase tracking-widest mb-2 ml-1">Similarity Threshold ({Math.round(threshold * 100)}%)</label>
-                <input 
-                  type="range" 
-                  min="0.5" 
-                  max="1.0" 
-                  step="0.01"
-                  value={threshold}
-                  onChange={e => setThreshold(parseFloat(e.target.value))}
-                  className="w-full h-2 bg-[#F3F4F6] rounded-lg appearance-none cursor-pointer accent-[#1A1A1A]"
-                />
-              </div>
-              <button 
-                onClick={runPlagiarismCheck}
-                disabled={isChecking || !selectedActivity}
-                className="py-3.5 bg-[#1A1A1A] text-white rounded-2xl font-bold hover:bg-[#333] transition-all disabled:opacity-50 flex items-center justify-center gap-2"
-              >
-                {isChecking ? 'Analyzing...' : 'Run Analysis'}
-              </button>
-            </div>
+            <p className="text-sm text-[#6B7280]">Students requesting manual review of their AI-generated marks.</p>
           </div>
 
-          {plagiarismResults.length > 0 ? (
-            <div className="space-y-6">
-              <h4 className="font-bold text-[#6B7280] uppercase tracking-widest text-xs ml-1">Detected Matches ({plagiarismResults.length})</h4>
-              {plagiarismResults.map((match, idx) => (
-                <motion.div 
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  key={idx} 
-                  className="bg-white p-8 rounded-[2rem] border border-[#DC2626]/20 shadow-sm relative overflow-hidden"
-                >
-                  <div className="absolute top-0 left-0 w-1.5 h-full bg-[#DC2626]" />
+          {humanEvalRequests.length > 0 ? (
+            <div className="grid grid-cols-1 gap-6">
+              {humanEvalRequests.map((req: any) => (
+                <div key={req._id} className="bg-white p-8 rounded-[2rem] border border-[#E5E7EB] shadow-sm hover:border-[#1A1A1A] transition-all">
                   <div className="flex justify-between items-start mb-6">
                     <div>
-                      <span className="text-[10px] font-bold text-[#DC2626] uppercase tracking-widest bg-red-50 px-2 py-1 rounded">High Similarity Detected</span>
-                      <h4 className="text-lg font-bold mt-2">{match.questionTitle}</h4>
+                      <h4 className="text-lg font-bold">{req.studentName}</h4>
+                      <p className="text-sm text-[#6B7280]">{req.activityTitle}</p>
                     </div>
                     <div className="text-right">
-                      <div className="text-2xl font-black text-[#DC2626]">{Math.round(match.similarity * 100)}%</div>
-                      <div className="text-[10px] font-bold text-[#6B7280] uppercase tracking-widest">Match Score</div>
+                      <div className="text-2xl font-black text-[#1A1A1A]">{req.totalScore}</div>
+                      <div className="text-[10px] font-bold text-[#6B7280] uppercase tracking-widest">AI Score</div>
                     </div>
                   </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                    <div className="space-y-3">
-                      <div className="flex items-center gap-2">
-                        <div className="w-6 h-6 bg-[#F3F4F6] rounded-full flex items-center justify-center text-[10px] font-bold">1</div>
-                        <span className="font-bold text-sm">{match.student1}</span>
-                      </div>
-                      <div className="p-4 bg-[#F9FAFB] rounded-2xl border border-[#E5E7EB] text-sm text-[#4B5563] italic leading-relaxed">
-                        "{match.answer1}"
-                      </div>
-                    </div>
-                    <div className="space-y-3">
-                      <div className="flex items-center gap-2">
-                        <div className="w-6 h-6 bg-[#F3F4F6] rounded-full flex items-center justify-center text-[10px] font-bold">2</div>
-                        <span className="font-bold text-sm">{match.student2}</span>
-                      </div>
-                      <div className="p-4 bg-[#F9FAFB] rounded-2xl border border-[#E5E7EB] text-sm text-[#4B5563] italic leading-relaxed">
-                        "{match.answer2}"
-                      </div>
-                    </div>
+                  <div className="flex gap-4">
+                    <button 
+                      onClick={() => setGradingSubmission(req)}
+                      className="px-6 py-2.5 bg-[#1A1A1A] text-white rounded-xl text-sm font-bold hover:bg-[#333] transition-all"
+                    >
+                      Review & Grade
+                    </button>
                   </div>
-                </motion.div>
+                </div>
               ))}
             </div>
-          ) : selectedActivity && !isChecking && (
+          ) : (
             <div className="p-20 text-center bg-white rounded-[2.5rem] border border-[#E5E7EB]">
               <CheckCircle2 size={48} className="mx-auto mb-4 text-[#16A34A] opacity-20" />
-              <p className="text-[#6B7280] font-medium">No plagiarism detected above {Math.round(threshold * 100)}% threshold.</p>
+              <p className="text-[#6B7280] font-medium">No pending evaluation requests.</p>
+            </div>
+          )}
+
+          {gradingSubmission && (
+            <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-[100]">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="bg-white p-8 rounded-3xl w-full max-w-2xl shadow-2xl max-h-[90vh] overflow-y-auto"
+              >
+                <h3 className="text-2xl font-bold mb-6">Manual Evaluation: {gradingSubmission.studentName}</h3>
+                <div className="space-y-6 mb-8">
+                  {JSON.parse(gradingSubmission.evaluatedAnswers).map((ans: any, idx: number) => (
+                    <div key={idx} className="p-6 bg-[#F9FAFB] rounded-2xl border border-[#E5E7EB]">
+                      <p className="text-xs font-bold text-[#6B7280] uppercase mb-2">Question {idx + 1}</p>
+                      <p className="font-bold mb-4">{ans.questionText || 'Question Text Not Available'}</p>
+                      <div className="p-4 bg-white rounded-xl border border-[#E5E7EB] text-sm mb-4 italic">
+                        "{ans.answerText}"
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-sm font-bold text-[#1A1A1A]">AI Score: {ans.score}/{ans.maxMarks}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-[10px] font-bold text-[#6B7280] uppercase tracking-widest mb-2 ml-1">Final Manual Grade</label>
+                    <input 
+                      type="number" 
+                      value={manualGrade}
+                      onChange={e => setManualGrade(e.target.value)}
+                      className="w-full px-4 py-3 bg-[#F9FAFB] border border-[#E5E7EB] rounded-2xl outline-none focus:ring-2 focus:ring-[#1A1A1A]"
+                      placeholder="Enter total marks..."
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-[#6B7280] uppercase tracking-widest mb-2 ml-1">Teacher Feedback</label>
+                    <textarea 
+                      value={manualFeedback}
+                      onChange={e => setManualFeedback(e.target.value)}
+                      className="w-full h-32 p-4 bg-[#F9FAFB] border border-[#E5E7EB] rounded-2xl outline-none focus:ring-2 focus:ring-[#1A1A1A] resize-none"
+                      placeholder="Provide feedback to the student..."
+                    />
+                  </div>
+                </div>
+
+                <div className="flex gap-4 mt-8">
+                  <button 
+                    onClick={submitManualGrade}
+                    disabled={isManualGrading || !manualGrade}
+                    className="flex-1 py-4 bg-[#1A1A1A] text-white rounded-2xl font-bold hover:bg-[#333] transition-all disabled:opacity-50"
+                  >
+                    {isManualGrading ? 'Saving...' : 'Save Manual Grade'}
+                  </button>
+                  <button 
+                    onClick={() => setGradingSubmission(null)}
+                    className="px-8 py-4 bg-[#F3F4F6] text-[#1A1A1A] rounded-2xl font-bold hover:bg-[#E5E7EB] transition-all"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </motion.div>
             </div>
           )}
         </div>
@@ -735,11 +769,164 @@ const TeacherDashboard = () => {
   );
 };
 
+const PlagiarismAnalyzer = ({ activityId, onClose }: { activityId: string, onClose: () => void }) => {
+  const [plagiarismResults, setPlagiarismResults] = useState<any[]>([]);
+  const [threshold, setThreshold] = useState(0.50);
+  const [isChecking, setIsChecking] = useState(false);
+  const { token } = useAuth();
+
+  useEffect(() => {
+    runPlagiarismCheck();
+  }, [activityId]);
+
+  const runPlagiarismCheck = async () => {
+    setIsChecking(true);
+    try {
+      const res = await axios.get(`/api/plagiarism/${activityId}?threshold=${threshold}`, { 
+        headers: { Authorization: `Bearer ${token}` } 
+      });
+      setPlagiarismResults(res.data.matches);
+    } catch (err) {
+      alert('Plagiarism check failed');
+    } finally {
+      setIsChecking(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-[100] overflow-y-auto">
+      <motion.div 
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        exit={{ opacity: 0, y: 20 }}
+        className="bg-[#F9FAFB] rounded-[3rem] w-full max-w-5xl shadow-2xl my-8 overflow-hidden flex flex-col max-h-[90vh]"
+      >
+        <div className="bg-white p-8 border-b border-[#E5E7EB] flex justify-between items-center">
+          <div>
+            <h3 className="text-2xl font-bold flex items-center gap-3">
+              <ShieldAlert className="text-[#DC2626]" /> Plagiarism Analysis
+            </h3>
+            <p className="text-sm text-[#6B7280] mt-1">Comparing all student submissions for this activity.</p>
+          </div>
+          <button onClick={onClose} className="p-3 hover:bg-[#F3F4F6] rounded-full transition-colors">
+            <X size={24} />
+          </button>
+        </div>
+
+        <div className="p-8 overflow-y-auto">
+          <div className="bg-white p-6 rounded-3xl border border-[#E5E7EB] shadow-sm mb-8">
+            <div className="flex flex-col md:flex-row md:items-center gap-6">
+              <div className="flex-1">
+                <label className="block text-[10px] font-bold text-[#6B7280] uppercase tracking-widest mb-3 ml-1">
+                  Similarity Threshold ({Math.round(threshold * 100)}%)
+                </label>
+                <input 
+                  type="range" 
+                  min="0.5" 
+                  max="1.0" 
+                  step="0.01"
+                  value={threshold}
+                  onChange={e => setThreshold(parseFloat(e.target.value))}
+                  className="w-full h-2 bg-[#F3F4F6] rounded-lg appearance-none cursor-pointer accent-[#1A1A1A]"
+                />
+              </div>
+              <button 
+                onClick={runPlagiarismCheck}
+                disabled={isChecking}
+                className="px-8 py-3.5 bg-[#1A1A1A] text-white rounded-2xl font-bold hover:bg-[#333] transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {isChecking ? 'Analyzing...' : 'Refresh Analysis'}
+              </button>
+            </div>
+          </div>
+
+          {isChecking ? (
+            <div className="py-20 text-center">
+              <div className="w-12 h-12 border-4 border-[#1A1A1A] border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+              <p className="text-[#6B7280] font-medium">Analyzing submissions for semantic and structural similarity...</p>
+            </div>
+          ) : plagiarismResults.length > 0 ? (
+            <div className="space-y-6">
+              <h4 className="font-bold text-[#6B7280] uppercase tracking-widest text-xs ml-1">Detected Matches ({plagiarismResults.length})</h4>
+              {plagiarismResults.map((match, idx) => (
+                <motion.div 
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  key={idx} 
+                  className="bg-white p-8 rounded-[2rem] border border-[#DC2626]/20 shadow-sm relative overflow-hidden"
+                >
+                  <div className="absolute top-0 left-0 w-1.5 h-full bg-[#DC2626]" />
+                  <div className="flex justify-between items-start mb-6">
+                    <div>
+                      <span className={cn(
+                        "text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded",
+                        match.similarity > 0.85 ? "bg-red-50 text-[#DC2626]" : "bg-orange-50 text-[#EA580C]"
+                      )}>
+                        {match.similarity > 0.85 ? 'Critical Similarity' : 'High Similarity'}
+                      </span>
+                      <h4 className="text-lg font-bold mt-2">{match.questionTitle}</h4>
+                    </div>
+                    <div className="text-right">
+                      <div className={cn(
+                        "text-2xl font-black",
+                        match.similarity > 0.85 ? "text-[#DC2626]" : "text-[#EA580C]"
+                      )}>{Math.round(match.similarity * 100)}%</div>
+                      <div className="text-[10px] font-bold text-[#6B7280] uppercase tracking-widest">Combined Score</div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4 mb-6">
+                    <div className="p-3 bg-[#F9FAFB] rounded-xl border border-[#E5E7EB] text-center">
+                      <div className="text-xs font-bold text-[#6B7280] uppercase tracking-tighter mb-1">Semantic Match</div>
+                      <div className="text-lg font-bold text-[#1A1A1A]">{Math.round(match.cosineSim * 100)}%</div>
+                    </div>
+                    <div className="p-3 bg-[#F9FAFB] rounded-xl border border-[#E5E7EB] text-center">
+                      <div className="text-xs font-bold text-[#6B7280] uppercase tracking-tighter mb-1">Word Overlap</div>
+                      <div className="text-lg font-bold text-[#1A1A1A]">{Math.round(match.jaccardSim * 100)}%</div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2">
+                        <div className="w-6 h-6 bg-[#F3F4F6] rounded-full flex items-center justify-center text-[10px] font-bold">1</div>
+                        <span className="font-bold text-sm">{match.student1}</span>
+                      </div>
+                      <div className="p-4 bg-[#F9FAFB] rounded-2xl border border-[#E5E7EB] text-sm text-[#4B5563] italic leading-relaxed">
+                        "{match.answer1}"
+                      </div>
+                    </div>
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2">
+                        <div className="w-6 h-6 bg-[#F3F4F6] rounded-full flex items-center justify-center text-[10px] font-bold">2</div>
+                        <span className="font-bold text-sm">{match.student2}</span>
+                      </div>
+                      <div className="p-4 bg-[#F9FAFB] rounded-2xl border border-[#E5E7EB] text-sm text-[#4B5563] italic leading-relaxed">
+                        "{match.answer2}"
+                      </div>
+                    </div>
+                  </div>
+                </motion.div>
+              ))}
+            </div>
+          ) : (
+            <div className="p-20 text-center bg-white rounded-[2.5rem] border border-[#E5E7EB]">
+              <CheckCircle2 size={48} className="mx-auto mb-4 text-[#16A34A] opacity-20" />
+              <p className="text-[#6B7280] font-medium">No plagiarism detected above {Math.round(threshold * 100)}% threshold.</p>
+            </div>
+          )}
+        </div>
+      </motion.div>
+    </div>
+  );
+};
+
 const ClassroomDetail = () => {
   const { id } = useParams();
   const [classroom, setClassroom] = useState<any>(null);
   const [activities, setActivities] = useState<any[]>([]);
   const [showCreateActivity, setShowCreateActivity] = useState(false);
+  const [checkingPlagiarismActivityId, setCheckingPlagiarismActivityId] = useState<string | null>(null);
   const [newActivity, setNewActivity] = useState({ title: '', type: 'exam', duration: 60, deadline: '' });
   const [questions, setQuestions] = useState([{ text: '', maxMarks: 10, referenceAnswer: '', minWords: 0, maxWords: 0 }]);
   const { token } = useAuth();
@@ -826,17 +1013,31 @@ const ClassroomDetail = () => {
                 <Clock size={16} /> {act.type === 'assignment' ? format(new Date(act.deadline), 'MMM d') : `${act.duration}m`}
               </div>
             </div>
-            <Link 
-              to={`/activity/${act._id}/results`}
-              className="w-full flex items-center justify-center gap-2 py-3 bg-[#F3F4F6] text-[#1A1A1A] rounded-xl font-semibold hover:bg-[#E5E7EB] transition-all"
-            >
-              <BarChart3 size={18} /> View Results
-            </Link>
+            <div className="grid grid-cols-2 gap-3">
+              <Link 
+                to={`/activity/${act._id}/results`}
+                className="flex items-center justify-center gap-2 py-3 bg-[#F3F4F6] text-[#1A1A1A] rounded-xl font-semibold hover:bg-[#E5E7EB] transition-all"
+              >
+                <BarChart3 size={18} /> Results
+              </Link>
+              <button 
+                onClick={() => setCheckingPlagiarismActivityId(act._id)}
+                className="flex items-center justify-center gap-2 py-3 bg-[#FEF2F2] text-[#DC2626] rounded-xl font-semibold hover:bg-[#FEE2E2] transition-all"
+              >
+                <ShieldAlert size={18} /> Plagiarism
+              </button>
+            </div>
           </div>
         ))}
       </div>
 
       <AnimatePresence>
+        {checkingPlagiarismActivityId && (
+          <PlagiarismAnalyzer 
+            activityId={checkingPlagiarismActivityId} 
+            onClose={() => setCheckingPlagiarismActivityId(null)} 
+          />
+        )}
         {showCreateActivity && (
           <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-[100] overflow-y-auto">
             <motion.div 
@@ -1356,6 +1557,7 @@ const ResultsView = () => {
   const [submissions, setSubmissions] = useState<any[]>([]);
   const [selectedSubmission, setSelectedSubmission] = useState<any>(null);
   const [isReevaluating, setIsReevaluating] = useState(false);
+  const [isRequestingHuman, setIsRequestingHuman] = useState(false);
   const { user, token } = useAuth();
 
   useEffect(() => {
@@ -1381,13 +1583,47 @@ const ResultsView = () => {
       const res = await axios.post(`/api/submissions/${selectedSubmission._id}/re-evaluate`, {}, { 
         headers: { Authorization: `Bearer ${token}` } 
       });
-      // Fetch submissions again to refresh the UI
-      await fetchSubmissions();
-      alert('Re-evaluation complete! Your marks and feedback have been updated.');
-    } catch (err) {
-      alert('Re-evaluation failed. Please try again later.');
+      
+      // Update the selected submission with the new data from the server
+      setSelectedSubmission({
+        ...selectedSubmission,
+        totalScore: res.data.totalScore,
+        evaluatedAnswers: res.data.evaluatedAnswers,
+        reevaluationCount: (selectedSubmission.reevaluationCount || 0) + 1
+      });
+      
+      if (res.data.isNewScoreHigher) {
+        alert('Re-evaluation complete! Your score improved and has been updated.');
+      } else {
+        alert('Re-evaluation complete! Your original score was higher, so it has been retained.');
+      }
+      
+      // Refresh all submissions to keep the list in sync
+      fetchSubmissions();
+    } catch (err: any) {
+      if (err.response?.status === 400) {
+        alert(err.response.data.message);
+      } else {
+        alert('Re-evaluation failed. Please try again later.');
+      }
     } finally {
       setIsReevaluating(false);
+    }
+  };
+
+  const handleRequestHumanEval = async () => {
+    if (!selectedSubmission) return;
+    setIsRequestingHuman(true);
+    try {
+      await axios.post(`/api/submissions/${selectedSubmission._id}/request-human-eval`, {}, { 
+        headers: { Authorization: `Bearer ${token}` } 
+      });
+      await fetchSubmissions();
+      alert('Human evaluation requested! The teacher will be notified.');
+    } catch (err) {
+      alert('Request failed. Please try again later.');
+    } finally {
+      setIsRequestingHuman(false);
     }
   };
 
@@ -1478,23 +1714,50 @@ const ResultsView = () => {
           </div>
           
           {user?.role === 'student' && (
-            <button 
-              onClick={handleReevaluate}
-              disabled={isReevaluating}
-              className="flex items-center gap-2 px-4 py-2 bg-[#F3F4F6] text-[#1A1A1A] rounded-xl text-xs font-bold hover:bg-[#E5E7EB] transition-all disabled:opacity-50"
-            >
-              {isReevaluating ? (
-                <>
-                  <div className="w-3 h-3 border-2 border-[#1A1A1A]/20 border-t-[#1A1A1A] rounded-full animate-spin" />
-                  Re-evaluating...
-                </>
-              ) : (
-                <>
-                  <Timer size={14} />
-                  Request Re-evaluation
-                </>
+            <div className="flex gap-3">
+              <button 
+                onClick={handleReevaluate}
+                disabled={isReevaluating || submission.reevaluationCount >= 1}
+                className="flex items-center gap-2 px-4 py-2 bg-[#F3F4F6] text-[#1A1A1A] rounded-xl text-xs font-bold hover:bg-[#E5E7EB] transition-all disabled:opacity-50"
+              >
+                {isReevaluating ? (
+                  <>
+                    <div className="w-3 h-3 border-2 border-[#1A1A1A]/20 border-t-[#1A1A1A] rounded-full animate-spin" />
+                    Re-evaluating...
+                  </>
+                ) : (
+                  <>
+                    <Timer size={14} />
+                    {submission.reevaluationCount >= 1 ? 'Re-evaluation Used' : 'Request AI Re-evaluation'}
+                  </>
+                )}
+              </button>
+              
+              {submission.status === 'evaluated' && !submission.humanEvalRequested && (
+                <button 
+                  onClick={handleRequestHumanEval}
+                  disabled={isRequestingHuman}
+                  className="flex items-center gap-2 px-4 py-2 bg-[#1A1A1A] text-white rounded-xl text-xs font-bold hover:bg-[#333] transition-all disabled:opacity-50"
+                >
+                  {isRequestingHuman ? (
+                    <>
+                      <div className="w-3 h-3 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                      Requesting...
+                    </>
+                  ) : (
+                    <>
+                      <UserCheck size={14} />
+                      Request Human Evaluation
+                    </>
+                  )}
+                </button>
               )}
-            </button>
+              {submission.humanEvalRequested === 1 && (
+                <div className="px-4 py-2 bg-[#FEF2F2] text-[#DC2626] rounded-xl text-xs font-bold border border-[#FEE2E2]">
+                  Human Review Pending
+                </div>
+              )}
+            </div>
           )}
         </div>
       </div>
@@ -1515,6 +1778,32 @@ const ResultsView = () => {
           <p className="text-2xl font-bold capitalize">{submission.status}</p>
         </div>
       </div>
+
+      {submission.manualGrade !== null && (
+        <div className="bg-[#1A1A1A] p-8 rounded-[2.5rem] text-white shadow-2xl relative overflow-hidden">
+          <div className="absolute top-0 right-0 p-8 opacity-10">
+            <UserCheck size={120} />
+          </div>
+          <div className="relative z-10">
+            <div className="flex items-center gap-2 mb-4">
+              <span className="px-3 py-1 bg-white/20 rounded-full text-[10px] font-bold uppercase tracking-widest">Manual Evaluation Result</span>
+            </div>
+            <div className="flex justify-between items-end mb-6">
+              <div>
+                <h3 className="text-2xl font-bold mb-1">Teacher's Final Grade</h3>
+                <p className="text-white/60 text-sm">This grade overrides the AI-generated score.</p>
+              </div>
+              <div className="text-right">
+                <div className="text-5xl font-black">{submission.manualGrade}<span className="text-2xl text-white/40">/{maxPossibleMarks}</span></div>
+              </div>
+            </div>
+            <div className="p-6 bg-white/10 rounded-2xl border border-white/10">
+              <h4 className="text-xs font-bold text-white/60 uppercase mb-2 tracking-widest">Teacher Feedback</h4>
+              <p className="text-sm leading-relaxed italic">"{submission.manualFeedback}"</p>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="space-y-8">
         <h2 className="text-xl font-bold">Question Breakdown</h2>

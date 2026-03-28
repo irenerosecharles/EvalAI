@@ -64,7 +64,11 @@ db.exec(`
     answers TEXT NOT NULL, -- JSON string
     evaluatedAnswers TEXT, -- JSON string
     totalScore REAL DEFAULT 0,
-    status TEXT CHECK(status IN ('draft', 'submitted', 'evaluated')) DEFAULT 'submitted',
+    status TEXT CHECK(status IN ('draft', 'submitted', 'evaluated', 'manual_review')) DEFAULT 'submitted',
+    reevaluationCount INTEGER DEFAULT 0,
+    humanEvalRequested INTEGER DEFAULT 0,
+    manualGrade REAL,
+    manualFeedback TEXT,
     submittedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (activityId) REFERENCES activities(id),
     FOREIGN KEY (studentId) REFERENCES users(id)
@@ -80,14 +84,23 @@ db.exec(`
   );
 `);
 
-// Migration: Add evaluatedAnswers if it doesn't exist
-try {
-  db.prepare("SELECT evaluatedAnswers FROM submissions LIMIT 1").get();
-} catch (e) {
+// Migration: Add new columns if they don't exist
+const columnsToAdd = [
+  { name: 'reevaluationCount', type: 'INTEGER DEFAULT 0' },
+  { name: 'humanEvalRequested', type: 'INTEGER DEFAULT 0' },
+  { name: 'manualGrade', type: 'REAL' },
+  { name: 'manualFeedback', type: 'TEXT' }
+];
+
+for (const col of columnsToAdd) {
   try {
-    db.exec("ALTER TABLE submissions ADD COLUMN evaluatedAnswers TEXT");
-  } catch (err) {
-    console.error("Migration failed:", err);
+    db.prepare(`SELECT ${col.name} FROM submissions LIMIT 1`).get();
+  } catch (e) {
+    try {
+      db.exec(`ALTER TABLE submissions ADD COLUMN ${col.name} ${col.type}`);
+    } catch (err) {
+      console.error(`Migration failed for ${col.name}:`, err);
+    }
   }
 }
 
@@ -313,11 +326,13 @@ async function startServer() {
     const submission = db.prepare("SELECT * FROM submissions WHERE id = ?").get(submissionId) as any;
     if (!submission) return res.status(404).json({ message: "Submission not found" });
 
+    if (submission.reevaluationCount >= 1) {
+      return res.status(400).json({ message: "Re-evaluation is only allowed once per student." });
+    }
+
     const activity = db.prepare("SELECT * FROM activities WHERE id = ?").get(submission.activityId) as any;
     if (!activity) return res.status(404).json({ message: "Activity not found" });
 
-    const classroom = db.prepare("SELECT * FROM classrooms WHERE id = ?").get(activity.classroomId) as any;
-    
     if (req.user.role !== 'teacher' && submission.studentId !== req.user.id) {
       return res.status(403).json({ message: "Unauthorized" });
     }
@@ -341,12 +356,30 @@ async function startServer() {
         return { ...ans, ...evalResult };
       }));
 
-      const totalScore = evaluatedAnswers.reduce((sum, ans) => sum + (ans.score || 0), 0);
+      const newTotalScore = evaluatedAnswers.reduce((sum, ans) => sum + (ans.score || 0), 0);
+      const originalScore = submission.totalScore || 0;
       
-      db.prepare("UPDATE submissions SET evaluatedAnswers = ?, totalScore = ?, status = ? WHERE id = ?")
-        .run(JSON.stringify(evaluatedAnswers), totalScore, 'evaluated', submissionId);
+      // Pick the higher mark
+      const isNewScoreHigher = newTotalScore > originalScore;
+      const finalScore = Math.max(originalScore, newTotalScore);
+      const finalEvaluatedAnswers = isNewScoreHigher ? evaluatedAnswers : JSON.parse(submission.evaluatedAnswers);
+      
+      db.prepare("UPDATE submissions SET evaluatedAnswers = ?, totalScore = ?, status = ?, reevaluationCount = reevaluationCount + 1 WHERE id = ?")
+        .run(JSON.stringify(finalEvaluatedAnswers), finalScore, 'evaluated', submissionId);
 
-      res.json({ message: "Re-evaluation complete", totalScore });
+      // Notify Teacher
+      const classroom = db.prepare("SELECT * FROM classrooms WHERE id = ?").get(activity.classroomId) as any;
+      if (classroom) {
+        db.prepare("INSERT INTO notifications (userId, message) VALUES (?, ?)")
+          .run(classroom.teacherId, `Student ${req.user.name} requested and received an AI re-evaluation for ${activity.title}. Final Score: ${finalScore}`);
+      }
+
+      res.json({ 
+        message: "Re-evaluation complete", 
+        totalScore: finalScore, 
+        evaluatedAnswers: finalEvaluatedAnswers,
+        isNewScoreHigher
+      });
     } catch (error: any) {
       if (error.message === 'INVALID_API_KEY') {
         return res.status(401).json({ message: "INVALID_API_KEY" });
@@ -354,6 +387,55 @@ async function startServer() {
       console.error("Re-evaluation error:", error);
       res.status(500).json({ message: "Re-evaluation failed" });
     }
+  });
+
+  app.post("/api/submissions/:id/request-human-eval", authenticate, (req: any, res) => {
+    const submissionId = req.params.id;
+    const submission = db.prepare("SELECT * FROM submissions WHERE id = ?").get(submissionId) as any;
+    if (!submission) return res.status(404).json({ message: "Submission not found" });
+    
+    if (submission.studentId !== req.user.id) return res.status(403).json({ message: "Unauthorized" });
+    if (submission.status !== 'evaluated') return res.status(400).json({ message: "Can only request human evaluation after AI evaluation." });
+
+    db.prepare("UPDATE submissions SET humanEvalRequested = 1 WHERE id = ?").run(submissionId);
+
+    // Notify Teacher
+    const activity = db.prepare("SELECT * FROM activities WHERE id = ?").get(submission.activityId) as any;
+    const classroom = db.prepare("SELECT * FROM classrooms WHERE id = ?").get(activity.classroomId) as any;
+    if (classroom) {
+      db.prepare("INSERT INTO notifications (userId, message) VALUES (?, ?)")
+        .run(classroom.teacherId, `Student ${req.user.name} has requested a HUMAN evaluation for ${activity.title}.`);
+    }
+
+    res.json({ message: "Human evaluation requested successfully." });
+  });
+
+  app.post("/api/submissions/:id/manual-grade", authenticate, isTeacher, (req: any, res) => {
+    const { grade, feedback } = req.body;
+    const submissionId = req.params.id;
+    
+    db.prepare("UPDATE submissions SET manualGrade = ?, manualFeedback = ?, totalScore = ?, status = ?, humanEvalRequested = 0 WHERE id = ?")
+      .run(grade, feedback, grade, 'evaluated', submissionId);
+
+    // Notify Student
+    const submission = db.prepare("SELECT * FROM submissions WHERE id = ?").get(submissionId) as any;
+    const activity = db.prepare("SELECT * FROM activities WHERE id = ?").get(submission.activityId) as any;
+    db.prepare("INSERT INTO notifications (userId, message) VALUES (?, ?)")
+      .run(submission.studentId, `Your request for human evaluation for ${activity.title} has been completed. New Score: ${grade}`);
+
+    res.json({ message: "Manual grade saved successfully." });
+  });
+
+  app.get("/api/submissions/teacher/requests", authenticate, isTeacher, (req: any, res) => {
+    const requests = db.prepare(`
+      SELECT s.*, u.name as studentName, a.title as activityTitle
+      FROM submissions s
+      JOIN users u ON s.studentId = u.id
+      JOIN activities a ON s.activityId = a.id
+      JOIN classrooms c ON a.classroomId = c.id
+      WHERE c.teacherId = ? AND s.humanEvalRequested = 1
+    `).all(req.user.id);
+    res.json(requests.map((r: any) => ({ ...r, _id: r.id })));
   });
 
   app.get("/api/submissions/activity/:activityId", authenticate, (req: any, res) => {
@@ -384,11 +466,25 @@ async function startServer() {
 
   app.post("/api/submissions/:id/reevaluate", authenticate, async (req: any, res) => {
     const submissionId = req.params.id;
-    const submission = db.prepare("SELECT * FROM submissions WHERE id = ?").get(submissionId) as any;
+    const submission = db.prepare(`
+      SELECT s.*, a.classroomId, c.teacherId, a.title as activityTitle, u.name as studentName
+      FROM submissions s
+      JOIN activities a ON s.activityId = a.id
+      JOIN classrooms c ON a.classroomId = c.id
+      JOIN users u ON s.studentId = u.id
+      WHERE s.id = ?
+    `).get(submissionId) as any;
     
     if (!submission) return res.status(404).json({ message: "Submission not found" });
+    
+    // Check if user is authorized (student can re-evaluate their own, teacher can re-evaluate any)
     if (req.user.role !== 'teacher' && submission.studentId !== req.user.id) {
       return res.status(403).json({ message: "Unauthorized" });
+    }
+
+    // Limit re-evaluation to once per student (if not a teacher)
+    if (req.user.role === 'student' && (submission.reevaluationCount || 0) >= 1) {
+      return res.status(400).json({ message: "Re-evaluation limit reached (max 1 per student)" });
     }
 
     const activity = db.prepare("SELECT * FROM activities WHERE id = ?").get(submission.activityId) as any;
@@ -412,12 +508,26 @@ async function startServer() {
         return { ...ans, ...evalResult };
       }));
 
-      const totalScore = evaluatedAnswers.reduce((sum, ans) => sum + (ans.score || 0), 0);
+      const newTotalScore = evaluatedAnswers.reduce((sum, ans) => sum + (ans.score || 0), 0);
+      const originalScore = submission.totalScore || 0;
       
-      db.prepare("UPDATE submissions SET evaluatedAnswers = ?, totalScore = ? WHERE id = ?")
-        .run(JSON.stringify(evaluatedAnswers), totalScore, submissionId);
+      // Pick the higher mark
+      const finalScore = Math.max(originalScore, newTotalScore);
+      const finalEvaluatedAnswers = finalScore === newTotalScore ? evaluatedAnswers : JSON.parse(submission.evaluatedAnswers);
+      
+      db.prepare("UPDATE submissions SET evaluatedAnswers = ?, totalScore = ?, reevaluationCount = (reevaluationCount + 1) WHERE id = ?")
+        .run(JSON.stringify(finalEvaluatedAnswers), finalScore, submissionId);
 
-      res.json({ message: "Re-evaluation complete", totalScore, evaluatedAnswers });
+      // Notify the teacher
+      db.prepare("INSERT INTO notifications (userId, message) VALUES (?, ?)")
+        .run(submission.teacherId, `Student ${submission.studentName} requested and received a re-evaluation for "${submission.activityTitle}". Final score: ${finalScore}`);
+
+      res.json({ 
+        message: "Re-evaluation complete", 
+        totalScore: finalScore, 
+        evaluatedAnswers: finalEvaluatedAnswers,
+        isNewScoreHigher: newTotalScore > originalScore 
+      });
     } catch (error: any) {
       if (error.message === 'INVALID_API_KEY') {
         return res.status(401).json({ message: "INVALID_API_KEY" });
@@ -433,72 +543,88 @@ async function startServer() {
     res.json(notifications.map((n: any) => ({ ...n, _id: n.id })));
   });
 
-  // Plagiarism Check
-  app.get("/api/plagiarism/:activityId", authenticate, isTeacher, async (req: any, res) => {
-    try {
-      const submissions = db.prepare(`
-        SELECT s.*, u.name as studentName 
-        FROM submissions s 
-        JOIN users u ON s.studentId = u.id 
-        WHERE s.activityId = ?
-      `).all(req.params.activityId) as any[];
+  function calculateJaccardSimilarity(str1: string, str2: string) {
+  const words1 = new Set(str1.toLowerCase().split(/\s+/).filter(w => w.length > 2));
+  const words2 = new Set(str2.toLowerCase().split(/\s+/).filter(w => w.length > 2));
+  const intersection = new Set([...words1].filter(w => words2.has(w)));
+  const union = new Set([...words1, ...words2]);
+  return intersection.size / union.size;
+}
 
-      if (submissions.length < 2) {
-        return res.json({ matches: [] });
+// Plagiarism Check
+app.get("/api/plagiarism/:activityId", authenticate, isTeacher, async (req: any, res) => {
+  try {
+    const submissions = db.prepare(`
+      SELECT s.*, u.name as studentName 
+      FROM submissions s 
+      JOIN users u ON s.studentId = u.id 
+      WHERE s.activityId = ?
+    `).all(req.params.activityId) as any[];
+
+    if (submissions.length < 2) {
+      return res.json({ matches: [] });
+    }
+
+    const activity = db.prepare("SELECT * FROM activities WHERE id = ?").get(req.params.activityId) as any;
+    const questions = JSON.parse(activity.questions);
+    const threshold = parseFloat(req.query.threshold as string) || 0.50;
+
+    const results: any[] = [];
+
+    for (let qIdx = 0; qIdx < questions.length; qIdx++) {
+      const questionId = questions[qIdx]._id || qIdx.toString();
+      const studentAnswers: { studentName: string, answerText: string, embeddings?: number[] }[] = [];
+
+      for (const sub of submissions) {
+        const answers = JSON.parse(sub.answers);
+        const ans = answers.find((a: any) => a.questionId === questionId);
+        if (ans && ans.answerText && ans.answerText.trim().length > 10) {
+          studentAnswers.push({
+            studentName: sub.studentName,
+            answerText: ans.answerText
+          });
+        }
       }
 
-      const activity = db.prepare("SELECT * FROM activities WHERE id = ?").get(req.params.activityId) as any;
-      const questions = JSON.parse(activity.questions);
-      const threshold = parseFloat(req.query.threshold as string) || 0.85;
+      if (studentAnswers.length < 2) continue;
 
-      const results: any[] = [];
+      // Generate embeddings for all answers for this question
+      for (const sa of studentAnswers) {
+        sa.embeddings = await getEmbeddings(sa.answerText);
+      }
 
-      for (let qIdx = 0; qIdx < questions.length; qIdx++) {
-        const questionId = questions[qIdx]._id || qIdx.toString();
-        const studentAnswers: { studentName: string, answerText: string, embeddings?: number[] }[] = [];
+      // Compare all pairs
+      for (let i = 0; i < studentAnswers.length; i++) {
+        for (let j = i + 1; j < studentAnswers.length; j++) {
+          const cosineSim = calculateCosineSimilarity(studentAnswers[i].embeddings!, studentAnswers[j].embeddings!);
+          const jaccardSim = calculateJaccardSimilarity(studentAnswers[i].answerText, studentAnswers[j].answerText);
+          
+          // Weighted average: SBERT is good for semantic, Jaccard is good for exact word matches
+          // We give more weight to SBERT but Jaccard helps catch direct copy-pastes
+          const combinedSimilarity = (cosineSim * 0.7) + (jaccardSim * 0.3);
 
-        for (const sub of submissions) {
-          const answers = JSON.parse(sub.answers);
-          const ans = answers.find((a: any) => a.questionId === questionId);
-          if (ans && ans.answerText && ans.answerText.trim().length > 10) {
-            studentAnswers.push({
-              studentName: sub.studentName,
-              answerText: ans.answerText
+          if (combinedSimilarity >= threshold) {
+            results.push({
+              questionTitle: questions[qIdx].text,
+              student1: studentAnswers[i].studentName,
+              student2: studentAnswers[j].studentName,
+              similarity: parseFloat(combinedSimilarity.toFixed(4)),
+              cosineSim: parseFloat(cosineSim.toFixed(4)),
+              jaccardSim: parseFloat(jaccardSim.toFixed(4)),
+              answer1: studentAnswers[i].answerText,
+              answer2: studentAnswers[j].answerText
             });
           }
         }
-
-        if (studentAnswers.length < 2) continue;
-
-        // Generate embeddings for all answers for this question
-        for (const sa of studentAnswers) {
-          sa.embeddings = await getEmbeddings(sa.answerText);
-        }
-
-        // Compare all pairs
-        for (let i = 0; i < studentAnswers.length; i++) {
-          for (let j = i + 1; j < studentAnswers.length; j++) {
-            const similarity = calculateCosineSimilarity(studentAnswers[i].embeddings!, studentAnswers[j].embeddings!);
-            if (similarity >= threshold) {
-              results.push({
-                questionTitle: questions[qIdx].text,
-                student1: studentAnswers[i].studentName,
-                student2: studentAnswers[j].studentName,
-                similarity: parseFloat(similarity.toFixed(4)),
-                answer1: studentAnswers[i].answerText,
-                answer2: studentAnswers[j].answerText
-              });
-            }
-          }
-        }
       }
-
-      res.json({ matches: results });
-    } catch (error) {
-      console.error("Plagiarism check error:", error);
-      res.status(500).json({ message: "Plagiarism check failed" });
     }
-  });
+
+    res.json({ matches: results });
+  } catch (error) {
+    console.error("Plagiarism check error:", error);
+    res.status(500).json({ message: "Plagiarism check failed" });
+  }
+});
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {

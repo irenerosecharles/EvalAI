@@ -120,13 +120,16 @@ async function generateText(prompt: string, systemInstruction?: string) {
   return null;
 }
 
-async function generateJson(prompt: string, schema?: any) {
+async function generateJson(prompt: string, schema?: any, systemInstruction?: string) {
   // 1. Try Groq first
   const groq = getGroq();
   if (groq) {
     try {
       const chatCompletion = await groq.chat.completions.create({
-        messages: [{ role: "user" as any, content: prompt }],
+        messages: [
+          ...(systemInstruction ? [{ role: "system" as any, content: systemInstruction }] : []),
+          { role: "user" as any, content: prompt }
+        ],
         model: GROQ_MODEL,
         response_format: { type: "json_object" }
       });
@@ -145,6 +148,7 @@ async function generateJson(prompt: string, schema?: any) {
         model: MODEL_NAME,
         contents: prompt,
         config: {
+          systemInstruction,
           responseMimeType: "application/json",
           responseSchema: schema
         }
@@ -175,8 +179,9 @@ export async function evaluateAnswer(
 
     // 2. Generate an "Ideal Answer"
     let idealAnswer = reference || "No ideal answer provided.";
-    const idealPrompt = `As an expert academic, provide a concise, comprehensive, and accurate "Gold Standard" answer for the following question. 
-    This will be used to evaluate a student's response.
+    const idealPrompt = `As an expert academic, provide a comprehensive, accurate, and multi-faceted "Gold Standard" answer for the following question. 
+    Include key concepts, terminology, and different ways the answer could be correctly expressed.
+    This will be used as a benchmark to evaluate a student's response.
     
     Question: ${question}
     ${reference ? `Teacher's Hint/Reference: ${reference}` : ""}
@@ -192,8 +197,9 @@ export async function evaluateAnswer(
     const sbertScore = await getSbertScore(studentAnswer, idealAnswer);
 
     // 4. Feedback Generation
+    const systemInstruction = "You are an expert academic evaluator known for being fair, encouraging, and liberal in awarding marks for conceptual understanding. You prioritize the 'spirit' of the answer and award partial credit generously.";
     const evaluationPrompt = `
-      You are an expert academic evaluator. A student has answered a question.
+      A student has answered a question. Evaluate their response based on the provided rubric.
       
       Question: ${question}
       AI Ideal Answer: ${idealAnswer}
@@ -206,21 +212,26 @@ export async function evaluateAnswer(
       - Student's Actual Word Count: ${studentWords}
       
       Evaluation Rubric (Total 100%):
-      1. Content Accuracy (40%): How factually correct is the answer compared to the ideal answer? (Use SBERT score as a guide)
-      2. Depth & Detail (30%): Does the student provide sufficient explanation and context?
-      3. Structure & Clarity (20%): Is the answer well-organized and easy to understand?
-      4. Word Count Adherence (10%): Does the answer meet the length requirements?
+      1. Conceptual Accuracy (50%): Does the student demonstrate a correct understanding of the core concepts? Focus on the "spirit" of the answer rather than exact wording.
+      2. Depth & Detail (30%): Does the student provide sufficient explanation? Award partial marks even for brief but correct points.
+      3. Clarity & Expression (15%): Is the answer understandable? Do not penalize heavily for minor grammatical errors.
+      4. Word Count Adherence (5%): Only apply a small penalty if the answer is significantly outside the requested range.
       
-      Scoring Penalties:
-      - CRITICAL: If studentWords < (minWords * 0.2), Content Accuracy and Depth MUST be capped at 0.
-      - If studentWords < (minWords * 0.5), Content Accuracy and Depth MUST be capped at 50% of their max.
-      - If studentWords > maxWords, apply a 10% penalty to the final score.
+      Scoring Guidelines:
+      - BE LIBERAL: If the student is on the right track, give them the benefit of the doubt.
+      - PARTIAL CREDIT: Always award partial marks for any correct information provided.
+      - CONCEPT OVER FORM: Prioritize the correctness of the ideas over the length or structure of the response.
+      - SBERT GUIDE: The SBERT score is a mathematical guide; use your human-like reasoning to identify correct concepts that SBERT might miss due to different phrasing.
+      
+      Penalties (Apply ONLY if strictly necessary):
+      - If studentWords < (minWords * 0.3), apply a maximum 30% penalty to the total score (do not cap at 0 unless the answer is completely irrelevant).
+      - If studentWords > maxWords, apply a maximum 5% penalty.
       
       Instructions:
-      - First, perform a "reasoning" step where you analyze the student's answer against each rubric point.
+      - First, perform a "reasoning" step where you analyze the student's answer against each rubric point, highlighting where you've awarded marks for correct concepts.
       - Then, calculate the final "score" (0.0 to 1.0).
       - Provide specific "strengths" and "improvements".
-      - Write a professional "feedback" summary.
+      - Write a professional and encouraging "feedback" summary.
       
       IMPORTANT: Return ONLY a valid JSON object with keys: reasoning, score, strengths, improvements, feedback.
     `;
@@ -237,23 +248,29 @@ export async function evaluateAnswer(
       required: ["reasoning", "score", "strengths", "improvements", "feedback"]
     };
 
-    const result = await generateJson(evaluationPrompt, schema);
+    const result = await generateJson(evaluationPrompt, schema, systemInstruction);
 
     if (!result) {
+      // Fallback with a slightly more liberal SBERT interpretation
+      const liberalSbert = Math.min(1, sbertScore * 1.1);
       return {
         strengths: "N/A",
         improvements: "N/A",
-        score: parseFloat((sbertScore * maxMarks).toFixed(1)),
+        score: parseFloat((liberalSbert * maxMarks).toFixed(1)),
         feedback: "Evaluation fallback triggered due to an error.",
-        reasoning: "SBERT similarity used as score.",
-        isValid: sbertScore > 0.3,
+        reasoning: "SBERT similarity (with liberal adjustment) used as score.",
+        isValid: sbertScore > 0.2,
         wordCount: studentWords,
         maxMarks: maxMarks,
         sbertScore: sbertScore
       };
     }
 
-    const qualityScore = Math.max(0, Math.min(1, result.score || 0));
+    // Apply a "Liberal Boost" (10%) to the AI's score to better match human generosity
+    const rawScore = result.score || 0;
+    const liberalScore = Math.min(1, rawScore * 1.1);
+    const qualityScore = Math.max(0, liberalScore);
+    
     let finalScore = qualityScore * maxMarks;
     finalScore = Math.max(0, Math.min(maxMarks, finalScore));
 
