@@ -752,7 +752,10 @@ app.get("/api/plagiarism/:activityId", authenticate, isTeacher, async (req: any,
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { 
+        middlewareMode: true,
+        hmr: false
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);
