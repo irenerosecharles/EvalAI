@@ -33,3 +33,9 @@ EvalAI is a full-stack platform for academic evaluation. It allows teachers to c
 
 3. **AI Evaluation Note**: 
    In this cloud environment, the SBERT (local Python) and Ollama (local LLM) components are simulated using the Gemini API to provide a fully functional preview. In a local deployment, these can be swapped for the specific Python services described in the project report.
+
+
+
+
+HERE IS THE FINISHED AND HOSTED PLATFORM'S LINK:
+https://evalai-2dtr.onrender.com
